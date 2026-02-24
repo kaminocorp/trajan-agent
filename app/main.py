@@ -1,9 +1,12 @@
 import logging
 import sys
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import RequestResponseEndpoint
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.router import api_router
@@ -76,6 +79,74 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def public_domain_middleware(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
+    """Host-based filtering, CORS, security headers & welcome endpoint for the public API domain.
+
+    When public_api_host is set and the request's Host header matches it:
+    - Only /, /health, and /api/v1/public/* are reachable; all others → 404
+    - OPTIONS preflight gets permissive CORS headers (API-key auth, any origin)
+    - Responses include security headers (HSTS, X-Content-Type-Options, etc.)
+    - GET / returns a welcome JSON with endpoint discovery
+    """
+    if not settings.public_api_host:
+        return await call_next(request)
+
+    host = request.headers.get("host", "").split(":")[0]
+    if host != settings.public_api_host:
+        return await call_next(request)
+
+    path = request.url.path
+    is_allowed = path == "/" or path == "/health" or path.startswith("/api/v1/public/")
+
+    if not is_allowed:
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    # Phase 4 — CORS preflight for public domain (any origin, API-key auth)
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                "Access-Control-Max-Age": "86400",
+            },
+        )
+
+    # Phase 3 — Root welcome endpoint
+    response: Response
+    if path == "/" and request.method == "GET":
+        response = JSONResponse(
+            content={
+                "name": "Trajan Public API",
+                "version": "1.0",
+                "docs": "https://www.trajancloud.com/docs",
+                "endpoints": {
+                    "create_ticket": "POST /api/v1/public/tickets/",
+                    "interpret_ticket": "POST /api/v1/public/tickets/interpret",
+                    "list_tickets": "GET /api/v1/public/tickets/",
+                    "get_ticket": "GET /api/v1/public/tickets/{ticket_id}",
+                },
+            }
+        )
+    else:
+        response = await call_next(request)
+
+    # Phase 4 — CORS response header for non-preflight requests
+    response.headers["Access-Control-Allow-Origin"] = "*"
+
+    # Phase 6 — Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Request-Id"] = str(uuid.uuid4())
+
+    return response
 
 
 @app.middleware("http")

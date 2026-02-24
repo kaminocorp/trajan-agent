@@ -4,6 +4,7 @@ from app.api.v1 import (
     billing,
     documents,
     github,
+    infra,
     organizations,
     preferences,
     products,
@@ -19,6 +20,7 @@ from app.api.v1 import (
 
 __all__ = [
     "api_keys",
+    "infra",
     "products",
     "repositories",
     "work_items",

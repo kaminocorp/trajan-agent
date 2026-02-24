@@ -10,6 +10,7 @@ from app.api.v1 import (
     documents,
     feedback,
     github,
+    infra,
     internal,
     organizations,
     preferences,
@@ -45,5 +46,6 @@ api_router.include_router(referrals.router)
 api_router.include_router(announcements.router)
 api_router.include_router(agent.router)
 api_router.include_router(api_keys.router)
+api_router.include_router(infra.router)
 api_router.include_router(public_tickets.router)
 api_router.include_router(internal.router)

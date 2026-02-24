@@ -1,13 +1,14 @@
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlmodel import SQLModel
 
+from alembic import context
 from app.config import settings
+
 # Import all models to ensure they're registered with SQLModel.metadata
 # Using wildcard import to ensure all table models are in SQLModel.metadata
 from app.models import (  # noqa: F401
@@ -21,10 +22,12 @@ from app.models import (  # noqa: F401
     DocumentSection,
     DocumentSubsection,
     Feedback,
+    InfraComponent,
     Organization,
     OrganizationMember,
     Product,
     ProductAccess,
+    ProductApiKey,
     ProgressSummary,
     ReferralCode,
     Repository,

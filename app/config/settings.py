@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     frontend_url: str = "http://localhost:3000"  # For constructing shareable URLs
 
+    # Public API — custom domain for external-facing endpoints
+    # Empty string = host-filtering middleware disabled (safe for local dev)
+    public_api_host: str = ""
+
     # AI / Anthropic
     anthropic_api_key: str = ""
 

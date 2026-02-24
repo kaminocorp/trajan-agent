@@ -31,6 +31,7 @@ from app.models.feedback import (
     FeedbackStatus,
     FeedbackType,
 )
+from app.models.infra_component import InfraComponent, InfraComponentCreate, InfraComponentUpdate
 from app.models.organization import (
     MemberRole,
     Organization,
@@ -131,6 +132,9 @@ __all__ = [
     "AppInfo",
     "AppInfoCreate",
     "AppInfoUpdate",
+    "InfraComponent",
+    "InfraComponentCreate",
+    "InfraComponentUpdate",
     "Feedback",
     "FeedbackCreate",
     "FeedbackRead",
