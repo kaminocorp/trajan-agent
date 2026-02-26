@@ -72,18 +72,21 @@ async def list_work_items(
 async def list_all_work_items(
     status: str | None = Query(None, description="Filter by status"),
     product_id: uuid_pkg.UUID | None = Query(None, description="Filter by product"),
+    org_id: uuid_pkg.UUID | None = Query(None, description="Filter by organization"),
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_with_rls),
 ):
     """List all work items accessible to the user across products.
 
     RLS restricts results to products the user can access.
+    When org_id is provided, only returns work items for that organization.
     Excludes soft-deleted items.
     """
     items = await work_item_ops.get_all_accessible(
         db,
         status=status,
         product_id=product_id,
+        org_id=org_id,
     )
     return [_serialize_work_item(w) for w in items]
 

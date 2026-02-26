@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.product import Product
 from app.models.work_item import WorkItem
 
 
@@ -58,14 +59,21 @@ class WorkItemOperations:
         db: AsyncSession,
         status: str | None = None,
         product_id: uuid_pkg.UUID | None = None,
+        org_id: uuid_pkg.UUID | None = None,
     ) -> list[WorkItem]:
         """Get all work items accessible to the user across products.
 
         RLS restricts results to products the user can access.
         Excludes soft-deleted items by default.
+        When org_id is provided, only returns work items for products
+        belonging to that organization (prevents cross-tenancy bleed).
         """
         statement = select(WorkItem).where(WorkItem.deleted_at.is_(None))
 
+        if org_id:
+            statement = statement.join(Product, WorkItem.product_id == Product.id).where(
+                Product.organization_id == org_id
+            )
         if status:
             statement = statement.where(WorkItem.status == status)
         if product_id:
