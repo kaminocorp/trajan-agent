@@ -61,6 +61,7 @@ class CheckoutRequest(BaseModel):
     plan_tier: str
     organization_id: UUID
     source: str = "billing"  # "billing", "select-plan", or "onboarding" — determines redirect URLs
+    discount_code: str | None = None  # Optional discount code to apply at checkout
 
 
 class CheckoutResponse(BaseModel):
@@ -145,6 +146,20 @@ class DiscountInfoResponse(BaseModel):
     code: str
     discount_percent: int
     redeemed_at: str
+
+
+class ValidateDiscountRequest(BaseModel):
+    """Request to validate a discount code (without redeeming)."""
+
+    code: str
+
+
+class ValidateDiscountResponse(BaseModel):
+    """Response with discount code validation result."""
+
+    valid: bool
+    discount_percent: int
+    code: str
 
 
 class RemoveDiscountRequest(BaseModel):
@@ -284,12 +299,32 @@ async def create_checkout(
     # Only grant a free trial if this org has never subscribed before
     include_trial = subscription.first_subscribed_at is None
 
+    # Validate discount code and resolve Stripe coupon (if provided)
+    coupon_id: str | None = None
+    discount_code_value: str | None = None
+    if request.discount_code:
+        try:
+            discount = await discount_ops.validate_code(db, request.discount_code)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+        try:
+            coupon_id = stripe_service.get_or_create_discount_coupon(
+                discount.code, discount.discount_percent
+            )
+            discount_code_value = discount.code
+        except Exception as e:
+            logger.error(f"Failed to create Stripe coupon for checkout: {e}")
+            raise HTTPException(500, "Failed to prepare discount") from None
+
     checkout_url = stripe_service.create_checkout_session(
         customer_id=customer_id,
         plan_tier=request.plan_tier,
         success_url=success_url,
         cancel_url=cancel_url,
         include_trial=include_trial,
+        coupon_id=coupon_id,
+        discount_code=discount_code_value,
     )
 
     return CheckoutResponse(checkout_url=checkout_url)
@@ -620,6 +655,30 @@ async def downgrade_subscription(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@router.post("/validate-discount", response_model=ValidateDiscountResponse)
+async def validate_discount(
+    request: ValidateDiscountRequest,
+    db: DbSession,
+    _current_user: CurrentUser,
+) -> ValidateDiscountResponse:
+    """
+    Validate a discount code without redeeming it.
+
+    Returns the code and discount percentage if valid.
+    Used for live preview on plan selection pages.
+    """
+    try:
+        discount = await discount_ops.validate_code(db, request.code)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+    return ValidateDiscountResponse(
+        valid=True,
+        discount_percent=discount.discount_percent,
+        code=discount.code,
+    )
+
+
 @router.post("/apply-discount", response_model=ApplyDiscountResponse)
 async def apply_discount(
     request: ApplyDiscountRequest,
@@ -902,9 +961,81 @@ async def _handle_checkout_completed(
     logger.info(f"Activated {plan_tier} subscription for org {subscription.organization_id}")
 
     # ─────────────────────────────────────────────────────────────────────────────
+    # Discount Code Processing: Record redemption if a code was used at checkout
+    # ─────────────────────────────────────────────────────────────────────────────
+    discount_code = metadata.get("discount_code") if isinstance(metadata, dict) else None
+    if discount_code:
+        await _process_checkout_discount(db, discount_code, subscription, event_id)
+
+    # ─────────────────────────────────────────────────────────────────────────────
     # Referral Processing: Check if this user signed up via referral
     # ─────────────────────────────────────────────────────────────────────────────
     await _process_referral_conversion(db, subscription, stripe_subscription_id, event_id)
+
+
+async def _process_checkout_discount(
+    db: DbSession,
+    discount_code: str,
+    subscription: Any,
+    event_id: str,
+) -> None:
+    """
+    Record a discount code redemption after checkout completes.
+
+    Called from the checkout.session.completed webhook when the session
+    metadata contains a discount_code (set during Phase 1 checkout creation).
+    The coupon is already applied to the Stripe subscription at this point —
+    this function records the redemption in our DB for tracking.
+    """
+    org = await organization_ops.get(db, subscription.organization_id)
+    if not org:
+        logger.error(f"No org found for discount redemption: {subscription.organization_id}")
+        return
+
+    # Validate first to get the DiscountCode object (needed for percent + coupon_id)
+    try:
+        discount = await discount_ops.validate_code(db, discount_code)
+    except ValueError as e:
+        logger.warning(f"Discount code {discount_code} no longer valid at webhook time: {e}")
+        return
+
+    try:
+        await discount_ops.redeem_code(
+            db, discount_code, subscription.organization_id, org.owner_id
+        )
+    except ValueError as e:
+        # Code may have been exhausted between checkout creation and completion,
+        # or org may already have a discount — the Stripe coupon is already applied
+        # on the subscription, so log but don't fail the webhook.
+        logger.warning(
+            f"Discount redemption failed for code {discount_code} "
+            f"(org {subscription.organization_id}): {e}"
+        )
+        return
+
+    # Ensure stripe_coupon_id is persisted on the DiscountCode
+    if not discount.stripe_coupon_id:
+        discount.stripe_coupon_id = f"DISCOUNT_{discount_code.upper()}"
+        db.add(discount)
+
+    # Log billing event
+    await subscription_ops.log_event(
+        db,
+        organization_id=subscription.organization_id,
+        event_type=BillingEventType.DISCOUNT_APPLIED,
+        new_value={
+            "code": discount_code,
+            "discount_percent": discount.discount_percent,
+            "source": "checkout",
+        },
+        stripe_event_id=event_id,
+        description=f"Discount code {discount_code} applied at checkout",
+    )
+
+    logger.info(
+        f"Recorded discount redemption for code {discount_code} "
+        f"(org {subscription.organization_id})"
+    )
 
 
 async def _process_referral_conversion(

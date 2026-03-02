@@ -74,6 +74,8 @@ class StripeService:
         success_url: str,
         cancel_url: str,
         include_trial: bool = True,
+        coupon_id: str | None = None,
+        discount_code: str | None = None,
     ) -> str:
         """
         Create a Stripe Checkout session for plan subscription.
@@ -81,6 +83,10 @@ class StripeService:
         Returns the checkout session URL.
         Includes a 14-day free trial only if include_trial is True
         (first-time subscribers only).
+
+        If coupon_id is provided, the discount is applied to the Checkout Session
+        so Stripe displays the discounted price during payment. The discount_code
+        is stored in session metadata so the webhook can record the redemption.
         """
         base_price = StripeService.get_price_id(plan_tier)
 
@@ -98,19 +104,30 @@ class StripeService:
         if include_trial:
             subscription_data["trial_period_days"] = TRIAL_PERIOD_DAYS
 
+        # Session metadata — used by webhook to record discount redemption
+        session_metadata: dict[str, str] = {"plan_tier": plan_tier}
+        if discount_code:
+            session_metadata["discount_code"] = discount_code
+
+        # Build session kwargs
+        session_kwargs: dict[str, object] = {
+            "customer": customer_id,
+            "mode": "subscription",
+            "line_items": line_items,
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "subscription_data": subscription_data,
+            "metadata": session_metadata,
+        }
+
+        if coupon_id:
+            session_kwargs["discounts"] = [{"coupon": coupon_id}]
+
         try:
-            session = stripe.checkout.Session.create(
-                customer=customer_id,
-                mode="subscription",
-                line_items=line_items,  # type: ignore[arg-type]
-                success_url=success_url,
-                cancel_url=cancel_url,
-                subscription_data=subscription_data,
-                metadata={"plan_tier": plan_tier},
-            )
+            session = stripe.checkout.Session.create(**session_kwargs)  # type: ignore[arg-type]
             logger.info(
                 f"Created checkout session for customer {customer_id}, "
-                f"tier {plan_tier}, trial={include_trial}"
+                f"tier {plan_tier}, trial={include_trial}, discount={discount_code}"
             )
             return session.url or ""
         except StripeError as e:
