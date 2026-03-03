@@ -120,6 +120,21 @@ class CreateWorkspaceResponse(BaseModel):
     slug: str
 
 
+class CheckTeamSlugRequest(BaseModel):
+    """Request to check an org slug during onboarding."""
+
+    slug: str
+
+
+class CheckTeamSlugResponse(BaseModel):
+    """Response for slug check — privacy-safe."""
+
+    exists: bool
+    is_member: bool
+    org_id: str | None = None  # Only populated if is_member=True
+    org_name: str | None = None  # Only populated if is_member=True
+
+
 class OnboardingContext(BaseModel):
     """Context for frontend to determine which onboarding flow to show."""
 
@@ -336,6 +351,37 @@ async def create_workspace(
         name=org.name,
         slug=org.slug,
     )
+
+
+@router.post("/me/check-team-slug", response_model=CheckTeamSlugResponse)
+async def check_team_slug(
+    data: CheckTeamSlugRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_with_rls),
+):
+    """
+    Check if an org slug exists and whether the current user is a member.
+
+    Privacy-safe: only reveals org name/ID to existing members.
+    Used during onboarding "Join a team" flow.
+    """
+    slug = data.slug.strip().lower()
+    org = await organization_ops.get_by_slug(db, slug)
+
+    if not org:
+        return CheckTeamSlugResponse(exists=False, is_member=False)
+
+    role = await organization_ops.get_member_role(db, org.id, current_user.id)
+
+    if role is not None:
+        return CheckTeamSlugResponse(
+            exists=True,
+            is_member=True,
+            org_id=str(org.id),
+            org_name=org.name,
+        )
+
+    return CheckTeamSlugResponse(exists=True, is_member=False)
 
 
 @router.get("/me/onboarding-context", response_model=OnboardingContext)
