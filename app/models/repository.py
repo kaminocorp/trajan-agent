@@ -1,6 +1,7 @@
 import uuid as uuid_pkg
 from typing import TYPE_CHECKING, Optional
 
+from sqlalchemy import Index
 from sqlmodel import Field, Relationship, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
@@ -62,6 +63,9 @@ class Repository(RepositoryBase, UUIDMixin, TimestampMixin, table=True):
     """
 
     __tablename__ = "repositories"
+    __table_args__ = (
+        Index("ix_repositories_product_github", "product_id", "github_id"),
+    )
 
     product_id: uuid_pkg.UUID | None = Field(
         default=None,

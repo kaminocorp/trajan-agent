@@ -78,8 +78,8 @@ class Document(DocumentBase, UUIDMixin, TimestampMixin, table=True):
 
     __tablename__ = "documents"
     __table_args__ = (
-        # Functional index for folder path queries (grouping, filtering by folder)
         Index("ix_documents_folder_path", text("(folder->>'path')")),
+        Index("ix_documents_product_type", "product_id", "type"),
     )
 
     # Tracks who created this document (for audit trail)

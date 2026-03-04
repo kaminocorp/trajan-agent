@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Column, DateTime, String, Text, text
+from sqlalchemy import Column, DateTime, Index, String, Text, text
 from sqlmodel import Field, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
@@ -81,6 +81,9 @@ class Announcement(AnnouncementBase, UUIDMixin, TimestampMixin, table=True):
     """
 
     __tablename__ = "announcement"
+    __table_args__ = (
+        Index("idx_announcement_active", "is_active", "starts_at", "ends_at"),
+    )
 
 
 class AnnouncementRead(SQLModel):

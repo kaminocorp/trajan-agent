@@ -1,6 +1,7 @@
 import asyncio
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -23,6 +24,8 @@ from app.models import (  # noqa: F401
     DocumentSection,
     DocumentSubsection,
     Feedback,
+    GitHubAppInstallation,
+    GitHubAppInstallationRepo,
     InfraComponent,
     Organization,
     OrganizationMember,
@@ -47,6 +50,26 @@ if config.config_file_name is not None:
 target_metadata = SQLModel.metadata
 
 
+def include_object(
+    object: sa.schema.SchemaItem,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: sa.schema.SchemaItem | None,
+) -> bool:
+    """Filter out false-positive PK indexes from autogenerate.
+
+    SQLModel's UUIDMixin causes Alembic to detect phantom indexes on 'id'
+    columns that PostgreSQL already indexes via the primary key constraint.
+    """
+    if type_ == "index" and name and name.endswith("_id") and not reflected:
+        # Skip indexes that are just ix_<table>_id on the PK column
+        cols = [c.name for c in object.columns]  # type: ignore[attr-defined]
+        if cols == ["id"]:
+            return False
+    return True
+
+
 def get_url() -> str:
     """Return direct database URL for migrations (DDL requires direct connection)."""
     return settings.database_url_direct
@@ -60,6 +83,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -67,7 +91,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

@@ -7,8 +7,9 @@ and which specific repos each installation has access to (when using "selected" 
 import uuid as uuid_pkg
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
@@ -34,7 +35,12 @@ class GitHubAppInstallationRepo(UUIDMixin, TimestampMixin, SQLModel, table=True)
     __tablename__ = "github_app_installation_repos"
 
     installation_id: uuid_pkg.UUID = Field(
-        foreign_key="github_app_installations.id", index=True
+        sa_column=Column(
+            PG_UUID(as_uuid=True),
+            ForeignKey("github_app_installations.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
     )
     github_repo_id: int = Field(index=True)
     full_name: str = Field(max_length=500)

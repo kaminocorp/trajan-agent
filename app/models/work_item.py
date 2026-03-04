@@ -2,7 +2,7 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -81,6 +81,14 @@ class WorkItem(WorkItemBase, UUIDMixin, TimestampMixin, table=True):
     """
 
     __tablename__ = "work_items"
+    __table_args__ = (
+        Index(
+            "idx_work_items_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+    )
 
     # Tracks who created this work item (for audit trail)
     # This does NOT control visibility - Product access does that via RLS
@@ -107,7 +115,7 @@ class WorkItem(WorkItemBase, UUIDMixin, TimestampMixin, table=True):
         default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
     )
     commit_sha: str | None = Field(default=None, max_length=40)
-    commit_url: str | None = Field(default=None)
+    commit_url: str | None = Field(default=None, sa_type=Text())
     plans: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     tags: list[str] | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
     ticket_metadata: dict[str, object] | None = Field(

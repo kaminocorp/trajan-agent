@@ -1,7 +1,7 @@
 import uuid as uuid_pkg
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, String
+from sqlalchemy import Column, Index, String
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -106,6 +106,9 @@ class AppInfo(AppInfoBase, UUIDMixin, TimestampMixin, UserOwnedMixin, table=True
     """Key-value store for project context (env vars, URLs, notes)."""
 
     __tablename__ = "app_info"
+    __table_args__ = (
+        Index("ix_app_info_tags", "tags", postgresql_using="gin"),
+    )
 
     product_id: uuid_pkg.UUID | None = Field(
         default=None,
