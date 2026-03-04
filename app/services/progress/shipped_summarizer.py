@@ -177,7 +177,9 @@ ITEM: improvement | Improved search performance with indexed queries [m0n1o2p]""
             has_significant_changes=has_significant_changes,
         )
 
-    async def interpret(self, input_data: ShippedAnalysisInput) -> ShippedSummary:
+    async def interpret(
+        self, input_data: ShippedAnalysisInput, *, model_override: str | None = None
+    ) -> ShippedSummary:
         """Override to store input data for use in parse_output."""
         # Store input for access in parse_output (needed for product_id/name)
         self._current_input = input_data
@@ -191,7 +193,7 @@ ITEM: improvement | Improved search performance with indexed queries [m0n1o2p]""
                 has_significant_changes=False,
             )
 
-        return await super().interpret(input_data)
+        return await super().interpret(input_data, model_override=model_override)
 
     def _period_to_text(self, period: str) -> str:
         """Convert period code to human-readable text."""

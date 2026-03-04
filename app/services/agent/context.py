@@ -107,9 +107,12 @@ class ContextBuilder:
         Gracefully handles token revocation, rate limits, and access errors.
         Results are cached for 60s to avoid hammering GitHub during rapid chat.
         """
-        # Build cache key from repo names (token not included — same repos = same data)
+        # Build cache key from repo names + token hash to prevent cross-user leakage
         repo_names = sorted(getattr(r, "full_name", "") for r in repos[:_GITHUB_MAX_REPOS])
-        cache_key = hashlib.md5(f"agent_ctx:{':'.join(repo_names)}".encode()).hexdigest()
+        token_hash = hashlib.md5(github_token.encode()).hexdigest()[:8]
+        cache_key = hashlib.md5(
+            f"agent_ctx:{token_hash}:{':'.join(repo_names)}".encode()
+        ).hexdigest()
 
         cached: str | None = agent_context_cache.get(cache_key)
         if cached is not None:

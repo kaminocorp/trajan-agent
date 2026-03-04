@@ -207,7 +207,7 @@ async def get_app_info(
     db: AsyncSession = Depends(get_db_with_rls),
 ):
     """Get a single app info entry."""
-    entry = await app_info_ops.get_by_user(db, user_id=current_user.id, id=app_info_id)
+    entry = await app_info_ops.get(db, id=app_info_id)
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -289,7 +289,7 @@ async def update_app_info(
     db: AsyncSession = Depends(get_db_with_rls),
 ):
     """Update an app info entry."""
-    entry = await app_info_ops.get_by_user(db, user_id=current_user.id, id=app_info_id)
+    entry = await app_info_ops.get(db, id=app_info_id)
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -336,7 +336,7 @@ async def delete_app_info(
 ):
     """Delete an app info entry."""
     # First get the entry to check access
-    entry = await app_info_ops.get_by_user(db, user_id=current_user.id, id=app_info_id)
+    entry = await app_info_ops.get(db, id=app_info_id)
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -348,7 +348,8 @@ async def delete_app_info(
         await _check_variables_access(db, entry.product_id, current_user.id)
         await require_product_subscription(db, entry.product_id)
 
-    await app_info_ops.delete(db, id=app_info_id, user_id=current_user.id)
+    await db.delete(entry)
+    await db.flush()
 
 
 @router.get("/{app_info_id}/reveal")
@@ -361,7 +362,7 @@ async def reveal_app_info_value(
 
     **Rate limited:** 30 requests per minute per user.
     """
-    entry = await app_info_ops.get_by_user(db, user_id=current_user.id, id=app_info_id)
+    entry = await app_info_ops.get(db, id=app_info_id)
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

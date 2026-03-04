@@ -189,19 +189,29 @@ class DocsSyncService:
                 owner, repo_name, files_to_commit, commit_message, branch
             )
 
-            # Update sync tracking for all documents
+            # Update sync tracking for all documents.
+            # If per-file SHA fetch fails, mark the doc as needing re-sync
+            # rather than crashing — the commit already landed on GitHub.
             for doc in documents:
-                # Get the new SHA for the file
                 folder_path = doc.folder.get("path") if doc.folder else None
                 path = doc.github_path or generate_github_path(
                     doc.title or "untitled", folder_path, doc.type or "blueprint"
                 )
-                new_sha = await self.github_service.get_file_sha(owner, repo_name, path, branch)
-
-                doc.github_sha = new_sha
-                doc.github_path = path
-                doc.last_synced_at = datetime.now(UTC)
-                doc.sync_status = "synced"
+                try:
+                    new_sha = await self.github_service.get_file_sha(
+                        owner, repo_name, path, branch
+                    )
+                    doc.github_sha = new_sha
+                    doc.github_path = path
+                    doc.last_synced_at = datetime.now(UTC)
+                    doc.sync_status = "synced"
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to fetch SHA for {path} after commit — "
+                        f"will re-sync next time: {e}"
+                    )
+                    doc.github_path = path
+                    doc.sync_status = "pending"
 
             await self.db.commit()
 
@@ -491,7 +501,7 @@ class DocsSyncService:
             return
 
         document.content = file_content.content
-        document.github_sha = item.sha
+        document.github_sha = file_content.sha
         document.last_synced_at = datetime.now(UTC)
         document.sync_status = "synced"
         document.title = extract_title(file_content.content, item.path)

@@ -310,13 +310,16 @@ async def import_github_repos(
     This ensures collaborators on paid organizations can import repos using
     that org's subscription limits, not their personal org's limits.
     """
-    # Verify product exists and belongs to user (access check first)
-    product = await product_ops.get_by_user(db, user_id=current_user.id, id=data.product_id)
+    # Verify product exists
+    product = await product_ops.get(db, id=data.product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found",
         )
+
+    # Require editor access — viewers cannot import repositories
+    await check_product_editor_access(db, data.product_id, current_user.id)
 
     # Get subscription context for the PRODUCT's organization (not user's default)
     # Also checks subscription is active — raises 402 if pending/none
@@ -376,11 +379,19 @@ async def import_github_repos(
             repo_data = repos_by_id.get(github_id)
 
             if not repo_data:
-                # Try fetching with more pages if not found
-                skipped.append(
-                    SkippedRepo(github_id=github_id, reason="Repository not found in GitHub")
-                )
-                continue
+                # Repo not in first page — fetch directly by GitHub ID.
+                # This handles users with 100+ repos whose target repo
+                # wasn't in the initial pre-fetch batch.
+                try:
+                    repo_data = await github.get_repo_by_id(github_id)
+                except GitHubAPIError:
+                    skipped.append(
+                        SkippedRepo(
+                            github_id=github_id,
+                            reason="Repository not found in GitHub",
+                        )
+                    )
+                    continue
 
             # Fetch full details using owner/repo
             owner, repo_name = repo_data.full_name.split("/", 1)

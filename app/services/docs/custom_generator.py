@@ -580,6 +580,7 @@ class CustomDocGenerator:
             title=title,
             content=content,
             type=doc_type,
+            is_generated=True,
             folder={"path": "blueprints"},  # Default folder for custom docs
         )
         self.db.add(doc)

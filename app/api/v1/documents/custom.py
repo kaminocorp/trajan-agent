@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     SubscriptionContext,
+    check_product_editor_access,
     get_current_user,
     get_db_with_rls,
     require_product_subscription,
@@ -388,6 +389,9 @@ async def generate_assessment(
     """
     sub_ctx = await require_product_subscription(db, product_id)
 
+    # Require editor access — viewers cannot trigger assessment generation
+    await check_product_editor_access(db, product_id, current_user.id)
+
     # Check rate limit using the product's org tier (not user's default org)
     await check_custom_doc_rate_limit(sub_ctx, current_user, db)
 
@@ -441,59 +445,3 @@ async def generate_assessment(
         )
 
 
-async def save_custom_document(
-    product_id: uuid_pkg.UUID,
-    title: str,
-    content: str,
-    doc_type: str,
-    folder: str = "blueprints",
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_with_rls),
-) -> dict[str, Any]:
-    """
-    Save a generated custom document to the database.
-
-    This is called after the user previews the generated content and
-    decides to save it.
-
-    Args:
-        product_id: The product to save the document to
-        title: Document title
-        content: Document content (markdown)
-        doc_type: Type of document
-        folder: Folder to save in (default: blueprints)
-        current_user: The authenticated user
-        db: Database session
-
-    Returns:
-        The saved document
-    """
-    from app.models.document import Document
-
-    # Verify product exists (RLS enforces access)
-    product = await product_ops.get(db, id=product_id)
-    if not product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Product not found",
-        )
-
-    # Create the document
-    doc = Document(
-        product_id=product_id,
-        created_by_user_id=current_user.id,
-        title=title,
-        content=content,
-        type=doc_type,
-        folder={"path": folder},
-    )
-    db.add(doc)
-    await db.commit()
-    await db.refresh(doc)
-
-    logger.info(f"Saved custom document: {title}")
-
-    # Import serialize_document from crud module
-    from app.api.v1.documents.crud import serialize_document
-
-    return serialize_document(doc)

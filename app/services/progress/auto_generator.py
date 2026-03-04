@@ -222,7 +222,7 @@ class AutoProgressGenerator:
             await dashboard_shipped_ops.update_last_activity(
                 db, product.id, progress_period, latest_commit_date
             )
-            await db.flush()
+            await db.commit()
             return False
 
         # --- Generate 7d summaries (always) ---
@@ -259,7 +259,8 @@ class AutoProgressGenerator:
                     use_haiku=True,
                 )
 
-        await db.flush()
+        # Commit per-product so one failure doesn't roll back other products' summaries.
+        await db.commit()
         return True
 
     async def _generate_summaries_for_period(
@@ -334,14 +335,10 @@ class AutoProgressGenerator:
                 recent_commits=recent_commits_data,
             )
 
-            # Temporarily swap model for daily summaries
-            original_model = progress_summarizer.model
-            if use_haiku:
-                progress_summarizer.model = "claude-haiku-4-5-20251001"
-            try:
-                narrative = await progress_summarizer.interpret(progress_data)
-            finally:
-                progress_summarizer.model = original_model
+            haiku_model = "claude-haiku-4-5-20251001" if use_haiku else None
+            narrative = await progress_summarizer.interpret(
+                progress_data, model_override=haiku_model
+            )
 
             # --- Generate Per-Contributor Summaries ---
             try:
@@ -372,13 +369,9 @@ class AutoProgressGenerator:
                     contributors=contrib_data,
                 )
 
-                original_contrib_model = contributor_summarizer.model
-                if use_haiku:
-                    contributor_summarizer.model = "claude-haiku-4-5-20251001"
-                try:
-                    contrib_result = await contributor_summarizer.interpret(contrib_input)
-                finally:
-                    contributor_summarizer.model = original_contrib_model
+                contrib_result = await contributor_summarizer.interpret(
+                    contrib_input, model_override=haiku_model
+                )
 
                 contributor_summaries_data = [
                     {
@@ -433,13 +426,9 @@ class AutoProgressGenerator:
                 commits=commit_infos,
             )
 
-            original_shipped_model = shipped_summarizer.model
-            if use_haiku:
-                shipped_summarizer.model = "claude-haiku-4-5-20251001"
-            try:
-                summary = await shipped_summarizer.interpret(input_data)
-            finally:
-                shipped_summarizer.model = original_shipped_model
+            summary = await shipped_summarizer.interpret(
+                input_data, model_override=haiku_model
+            )
 
             items_as_dicts = [
                 {"description": item.description, "category": item.category}

@@ -24,6 +24,7 @@ class PreferencesRead(BaseModel):
     sidebar_default: str
     auto_generate_docs: bool
     github_setup_dismissed: bool
+    github_connect_modal_dismissed: bool
     invite_box_dismissed: bool
 
     class Config:
@@ -44,6 +45,7 @@ class PreferencesUpdate(BaseModel):
     sidebar_default: str | None = None
     auto_generate_docs: bool | None = None
     github_setup_dismissed: bool | None = None
+    github_connect_modal_dismissed: bool | None = None
     invite_box_dismissed: bool | None = None
 
 
@@ -79,6 +81,7 @@ def prefs_to_response(prefs: UserPreferences) -> dict:
         "sidebar_default": prefs.sidebar_default,
         "auto_generate_docs": prefs.auto_generate_docs,
         "github_setup_dismissed": prefs.github_setup_dismissed,
+        "github_connect_modal_dismissed": prefs.github_connect_modal_dismissed,
         "invite_box_dismissed": prefs.invite_box_dismissed,
     }
 

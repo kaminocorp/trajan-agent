@@ -288,13 +288,15 @@ Implemented the OAuth login flow with Google and GitHub providers [a1b2c3d]. Als
         }
         return period_map.get(period, period)
 
-    async def interpret(self, input_data: ContributorInput) -> ContributorSummaries:
+    async def interpret(
+        self, input_data: ContributorInput, *, model_override: str | None = None
+    ) -> ContributorSummaries:
         """Override to handle empty contributors without AI call."""
         if not input_data.contributors:
             return ContributorSummaries(items=[])
 
         self._current_input = input_data
-        result = await super().interpret(input_data)
+        result = await super().interpret(input_data, model_override=model_override)
 
         # Backfill stats from the input data
         contrib_map = {c.name: c for c in input_data.contributors}

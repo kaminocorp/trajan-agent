@@ -54,12 +54,20 @@ class BaseInterpreter(ABC, Generic[TInput, TOutput]):
         """Parse LLM response into typed output."""
         ...
 
-    async def interpret(self, input_data: TInput) -> TOutput:
-        """Main entry point: interpret input and return structured output."""
+    async def interpret(
+        self, input_data: TInput, *, model_override: str | None = None
+    ) -> TOutput:
+        """Main entry point: interpret input and return structured output.
+
+        Args:
+            input_data: Typed input for this interpreter.
+            model_override: If provided, use this model instead of self.model.
+                Avoids mutating shared singleton state for concurrency safety.
+        """
         user_message = self.format_input(input_data)
 
         response = await self.client.messages.create(
-            model=self.model,
+            model=model_override or self.model,
             max_tokens=self.max_tokens,
             system=self.get_system_prompt(),
             messages=[{"role": "user", "content": user_message}],

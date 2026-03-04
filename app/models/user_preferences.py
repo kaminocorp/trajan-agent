@@ -56,6 +56,7 @@ class UserPreferences(SQLModel, table=True):
 
     # Dismissals
     github_setup_dismissed: bool = Field(default=False)
+    github_connect_modal_dismissed: bool = Field(default=False)
     invite_box_dismissed: bool = Field(default=False)
 
     # Timestamps

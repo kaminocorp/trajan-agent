@@ -37,11 +37,19 @@ def _make_cache_key(func_name: str, args: tuple[Any, ...], kwargs: dict[str, Any
     """
     Generate a cache key from function name and arguments.
 
-    Skips 'self' (first positional arg) since we're caching by repo identity, not instance.
+    Includes a hash of the auth token from 'self' (first arg) to prevent
+    cross-user cache pollution — different tokens must produce different keys.
     """
-    # Skip 'self' (first arg is the instance)
+    # Extract token identity from 'self' (first arg is the GitHubReadOperations instance)
+    token_hash = ""
+    if args:
+        instance = args[0]
+        token = getattr(instance, "token", None)
+        if token:
+            token_hash = hashlib.md5(token.encode()).hexdigest()[:8]
+
     cache_args = args[1:] if args else ()
-    key_data = f"{func_name}:{cache_args}:{sorted(kwargs.items())}"
+    key_data = f"{func_name}:{token_hash}:{cache_args}:{sorted(kwargs.items())}"
     return hashlib.md5(key_data.encode()).hexdigest()
 
 

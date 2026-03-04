@@ -604,10 +604,13 @@ class GitHubReadOperations:
             Tuple of (commits list, has_more flag)
         """
         params: dict[str, str | int] = {"per_page": per_page + 1}  # Fetch one extra for has_more
-        if branch:
-            params["sha"] = branch
         if sha_cursor:
+            # Pagination: continue from this commit SHA.
+            # GitHub returns ancestors of the given SHA, which naturally
+            # follows the branch's commit history — no separate branch param needed.
             params["sha"] = sha_cursor
+        elif branch:
+            params["sha"] = branch
         if path:
             params["path"] = path
 

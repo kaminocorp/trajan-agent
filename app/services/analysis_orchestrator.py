@@ -117,7 +117,7 @@ class AnalysisOrchestrator:
             )
         )
 
-        repo_contexts = await self._fetch_all_contexts(repos)
+        repos, repo_contexts = await self._fetch_all_contexts(repos)
 
         if not repo_contexts:
             logger.error("Failed to fetch context from any repositories")
@@ -180,13 +180,20 @@ class AnalysisOrchestrator:
             return []
         return await repository_ops.get_github_repos_by_product(self.session, product_id)
 
-    async def _fetch_all_contexts(self, repos: list[Repository]) -> list[RepoContext]:
+    async def _fetch_all_contexts(
+        self, repos: list[Repository]
+    ) -> tuple[list[Repository], list[RepoContext]]:
         """
         Fetch contexts for all repositories with progress updates.
 
         Fetches are done sequentially to avoid overwhelming GitHub API,
         but each repo's internal file fetches run in parallel.
+
+        Returns:
+            Tuple of (successful_repos, repo_contexts) — both lists are
+            guaranteed to be the same length and aligned by index.
         """
+        successful_repos: list[Repository] = []
         repo_contexts: list[RepoContext] = []
 
         for i, repo in enumerate(repos):
@@ -202,6 +209,7 @@ class AnalysisOrchestrator:
                 )
 
                 context = await self._fetch_repo_context(repo)
+                successful_repos.append(repo)
                 repo_contexts.append(context)
                 logger.info(
                     f"Fetched context for {repo.full_name}: "
@@ -211,7 +219,7 @@ class AnalysisOrchestrator:
                 logger.error(f"Failed to fetch context for {repo.full_name}: {e}")
                 # Continue with other repos
 
-        return repo_contexts
+        return successful_repos, repo_contexts
 
     async def _fetch_repo_context(self, repo: Repository) -> RepoContext:
         """Fetch context for a single repository (without architecture files).

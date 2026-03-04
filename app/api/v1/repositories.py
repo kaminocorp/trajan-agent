@@ -226,10 +226,16 @@ async def update_repository(
             detail="Repository not found",
         )
 
+    # Repos must be associated with a product — orphaned repos cannot be modified
+    if not repo.product_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Repository is not associated with a product",
+        )
+
     # Check product access (editor required for updates)
-    if repo.product_id:
-        await check_product_editor_access(db, repo.product_id, current_user.id)
-        await require_product_subscription(db, repo.product_id)
+    await check_product_editor_access(db, repo.product_id, current_user.id)
+    await require_product_subscription(db, repo.product_id)
 
     updated = await repository_ops.update(
         db, db_obj=repo, obj_in=data.model_dump(exclude_unset=True)
@@ -252,9 +258,15 @@ async def delete_repository(
             detail="Repository not found",
         )
 
+    # Repos must be associated with a product — orphaned repos cannot be deleted
+    if not repo.product_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Repository is not associated with a product",
+        )
+
     # Check product access (editor required for deletion)
-    if repo.product_id:
-        await check_product_editor_access(db, repo.product_id, current_user.id)
-        await require_product_subscription(db, repo.product_id)
+    await check_product_editor_access(db, repo.product_id, current_user.id)
+    await require_product_subscription(db, repo.product_id)
 
     await repository_ops.delete(db, id=repository_id)
