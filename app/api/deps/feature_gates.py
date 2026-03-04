@@ -3,6 +3,7 @@
 import uuid as uuid_pkg
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,15 +163,53 @@ class FeatureGate:
         return True
 
 
-def check_subscription_active(ctx: SubscriptionContext) -> None:
-    """Raise 402 if the subscription is pending or has no plan selected.
+async def check_subscription_active(
+    ctx: SubscriptionContext, db: AsyncSession | None = None
+) -> None:
+    """Raise 402 if the subscription is pending, has no plan, or has expired.
 
     Use this to validate a pre-fetched SubscriptionContext (e.g., from
     get_subscription_context or get_subscription_context_for_product).
+
+    When ``db`` is provided and the subscription is a manually assigned plan
+    whose ``manual_assignment_expires_at`` is in the past, the subscription is
+    reverted to no-plan inline and a 402 is raised.
     """
+    sub = ctx.subscription
+
+    # Check for expired manual assignment (beta expiry)
+    if (
+        db is not None
+        and sub.is_manually_assigned
+        and sub.manual_assignment_expires_at is not None
+        and sub.manual_assignment_expires_at <= datetime.now(UTC)
+    ):
+        await subscription_ops.update(
+            db,
+            sub,
+            {
+                "plan_tier": "none",
+                "status": SubscriptionStatus.PENDING.value,
+                "is_manually_assigned": False,
+                "manually_assigned_by": None,
+                "manually_assigned_at": None,
+                "manual_assignment_note": None,
+                "manual_assignment_expires_at": None,
+                "base_repo_limit": 1,
+            },
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": "SUBSCRIPTION_REQUIRED",
+                "message": "Your free Pro access has expired — please select a plan to continue",
+            },
+        )
+
     is_pending = (
-        ctx.subscription.plan_tier == "none"
-        or ctx.subscription.status == SubscriptionStatus.PENDING.value
+        sub.plan_tier == "none"
+        or sub.status == SubscriptionStatus.PENDING.value
     )
     if is_pending:
         raise HTTPException(
@@ -184,6 +223,7 @@ def check_subscription_active(ctx: SubscriptionContext) -> None:
 
 async def require_active_subscription(
     ctx: SubscriptionContext = Depends(get_subscription_context),
+    db: AsyncSession = Depends(get_db),
 ) -> SubscriptionContext:
     """
     Require an active (non-pending) subscription to access the app.
@@ -196,7 +236,7 @@ async def require_active_subscription(
 
     Exempt endpoints (billing, user profile) should NOT use this dependency.
     """
-    check_subscription_active(ctx)
+    await check_subscription_active(ctx, db)
     return ctx
 
 
@@ -216,7 +256,7 @@ async def require_product_subscription(
     Raises 402 if subscription is pending or has no plan.
     """
     ctx = await get_subscription_context_for_product(db, product_id)
-    check_subscription_active(ctx)
+    await check_subscription_active(ctx, db)
     return ctx
 
 

@@ -169,6 +169,14 @@ class Subscription(SQLModel, table=True):
         nullable=True,
         sa_column_kwargs={"comment": "Reason for manual assignment, e.g., 'Founder account'"},
     )
+    manual_assignment_expires_at: datetime | None = Field(  # type: ignore[call-overload]
+        default=None,
+        nullable=True,
+        sa_type=DateTime(timezone=True),
+        sa_column_kwargs={
+            "comment": "When manual assignment expires — org reverts to no-plan after this date",
+        },
+    )
 
     # Timestamps
     created_at: datetime = Field(  # type: ignore[call-overload]

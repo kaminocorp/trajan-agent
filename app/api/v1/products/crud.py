@@ -226,7 +226,7 @@ async def create_product(
     """Create a new product."""
     # Check subscription is active for user's current org
     # (product doesn't exist yet, so we use the user's org context)
-    check_subscription_active(sub_ctx)
+    await check_subscription_active(sub_ctx, db)
 
     # Check for duplicate name
     existing = await product_ops.get_by_name(db, user_id=current_user.id, name=data.name)

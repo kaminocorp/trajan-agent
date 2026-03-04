@@ -145,7 +145,7 @@ async def create_repository(
             subscription=subscription,
             plan=get_plan(subscription.plan_tier),
         )
-        check_subscription_active(sub_ctx)
+        await check_subscription_active(sub_ctx, db)
 
     # Check repo limit before creation
     current_count = await repository_ops.count_by_org(db, sub_ctx.organization.id)
