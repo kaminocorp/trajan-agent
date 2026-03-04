@@ -1,10 +1,9 @@
 """Unified token resolution for GitHub API access.
 
 Resolves the best available token for a repository, checking:
-1. GitHub App installation token (short-lived, org-level) — preferred
-2. User's account-wide PAT (legacy fallback)
-
-Phase 2 will add per-repo fine-grained tokens and upload source bypass.
+1. Per-repo fine-grained token (highest specificity)
+2. GitHub App installation token (short-lived, org-level)
+3. User's account-wide PAT (legacy fallback)
 """
 
 import logging
@@ -12,15 +11,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import token_encryption
-from app.domain import (
-    github_app_installation_ops,
-    github_app_installation_repo_ops,
-    preferences_ops,
-    product_ops,
-)
-from app.models import Repository
 from app.core.audit import log_token_resolved
+from app.core.encryption import token_encryption
+from app.models import Repository
 from app.services.github.app_auth import github_app_auth
 
 logger = logging.getLogger(__name__)
@@ -37,16 +30,23 @@ class TokenResolver:
     ) -> tuple[str | None, str]:
         """Get the best available token for this repository.
 
-        Returns: (token, method) where method is "github_app" | "pat" | "none"
+        Returns: (token, method) where method is
+            "per_repo_token" | "github_app" | "pat" | "none"
         """
-        # Priority 1: GitHub App installation for this repo's org
+        # Priority 1: Per-repo fine-grained token (highest specificity)
+        if getattr(repository, "encrypted_token", None):
+            token = token_encryption.decrypt(repository.encrypted_token)
+            log_token_resolved(user_id, repository.full_name or "", "per_repo_token")
+            return token, "per_repo_token"
+
+        # Priority 2: GitHub App installation for this repo's org
         if github_app_auth.is_configured and repository.product_id:
             token = await self._try_app_token(repository)
             if token:
                 log_token_resolved(user_id, repository.full_name or "", "github_app")
                 return token, "github_app"
 
-        # Priority 2: User's account-wide PAT
+        # Priority 3: User's account-wide PAT
         token = await self._try_user_pat(user_id)
         if token:
             log_token_resolved(user_id, repository.full_name or "", "pat")
@@ -73,10 +73,10 @@ class TokenResolver:
 
         Prefers App installation for the org, falls back to user PAT.
         """
+        from app.domain import github_app_installation_ops
+
         if github_app_auth.is_configured:
-            installation = await github_app_installation_ops.get_for_org(
-                self.db, organization_id
-            )
+            installation = await github_app_installation_ops.get_for_org(self.db, organization_id)
             if installation and not installation.suspended_at:
                 try:
                     token = await github_app_auth.get_installation_token(
@@ -96,6 +96,12 @@ class TokenResolver:
 
     async def _try_app_token(self, repository: Repository) -> str | None:
         """Try to get a GitHub App installation token for this repo."""
+        from app.domain import (
+            github_app_installation_ops,
+            github_app_installation_repo_ops,
+            product_ops,
+        )
+
         product = await product_ops.get(self.db, repository.product_id)
         if not product or not product.organization_id:
             return None
@@ -119,17 +125,15 @@ class TokenResolver:
                 return None
 
         try:
-            return await github_app_auth.get_installation_token(
-                installation.installation_id
-            )
+            return await github_app_auth.get_installation_token(installation.installation_id)
         except Exception:
-            logger.warning(
-                f"Failed to get installation token for {installation.installation_id}"
-            )
+            logger.warning(f"Failed to get installation token for {installation.installation_id}")
             return None
 
     async def _try_user_pat(self, user_id: UUID) -> str | None:
         """Try to get the user's personal access token."""
+        from app.domain import preferences_ops
+
         prefs = await preferences_ops.get_by_user_id(self.db, user_id)
         if not prefs or not prefs.github_token:
             return None

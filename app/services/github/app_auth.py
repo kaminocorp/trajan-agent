@@ -8,7 +8,7 @@ Uses python-jose (already a project dependency) for RS256 JWT signing.
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from cachetools import TTLCache
 
@@ -26,7 +26,7 @@ class GitHubAppAuth:
             maxsize=100, ttl=3300
         )
 
-    def _create_jwt(self) -> str:
+    def create_app_jwt(self) -> str:
         """Create a short-lived JWT signed with the App's private key."""
         from jose import jwt as jose_jwt
 
@@ -45,12 +45,13 @@ class GitHubAppAuth:
 
         Returns cached token if still valid, otherwise generates a new one.
         """
-        if installation_id in self._token_cache:
-            token, expires_at = self._token_cache[installation_id]
-            if datetime.now(timezone.utc) < expires_at - timedelta(minutes=5):
+        cached = self._token_cache.get(installation_id)
+        if cached is not None:
+            token, expires_at = cached
+            if datetime.now(UTC) < expires_at - timedelta(minutes=5):
                 return token
 
-        app_jwt = self._create_jwt()
+        app_jwt = self.create_app_jwt()
         client = get_github_client()
         response = await client.post(
             f"https://api.github.com/app/installations/{installation_id}/access_tokens",

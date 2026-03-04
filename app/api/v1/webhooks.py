@@ -64,17 +64,24 @@ async def github_webhook(request: Request, db: DbSession) -> dict:
 
 async def _handle_installation(db: AsyncSession, payload: dict) -> None:
     """Handle app install/uninstall/suspend/unsuspend."""
-    action = payload["action"]
-    installation_data = payload["installation"]
-    installation_id = installation_data["id"]
+    action = payload.get("action")
+    installation_data = payload.get("installation")
+    if not action or not installation_data:
+        logger.warning("Malformed installation webhook — missing action or installation data")
+        return
+    installation_id = installation_data.get("id")
+    if not installation_id:
+        logger.warning("Malformed installation webhook — missing installation id")
+        return
 
     match action:
         case "created":
             # Installation record is created via the /link endpoint (Step 12)
             # where we have the org_id context from the OAuth state param.
+            account = installation_data.get("account", {})
             logger.info(
                 f"GitHub App installed: {installation_id} "
-                f"on {installation_data['account']['login']}"
+                f"on {account.get('login', 'unknown')}"
             )
 
         case "deleted":
@@ -94,7 +101,14 @@ async def _handle_installation(db: AsyncSession, payload: dict) -> None:
 
 async def _handle_repo_change(db: AsyncSession, payload: dict) -> None:
     """Handle repos added/removed from an installation."""
-    installation_id = payload["installation"]["id"]
+    installation_data = payload.get("installation")
+    if not installation_data:
+        logger.warning("Malformed repo change webhook — missing installation data")
+        return
+    installation_id = installation_data.get("id")
+    if not installation_id:
+        logger.warning("Malformed repo change webhook — missing installation id")
+        return
 
     installation = await github_app_installation_ops.get_by_installation_id(
         db, installation_id

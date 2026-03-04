@@ -11,10 +11,11 @@ import uuid as uuid_pkg
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, DbSession
 from app.domain import github_app_installation_ops
+from app.domain.organization_operations import organization_ops
+from app.models.organization import MemberRole
 from app.services.github.app_auth import github_app_auth
 from app.services.github.http_client import get_github_client
 
@@ -46,6 +47,11 @@ async def link_github_installation(
     current_user: CurrentUser,
 ) -> GitHubAppInstallationResponse:
     """Link a GitHub App installation to a Trajan organization."""
+    # Require org admin to link installations
+    role = await organization_ops.get_member_role(db, data.organization_id, current_user.id)
+    if role not in (MemberRole.OWNER.value, MemberRole.ADMIN.value):
+        raise HTTPException(403, "Admin or owner access required")
+
     if not github_app_auth.is_configured:
         raise HTTPException(400, "GitHub App is not configured")
 
@@ -57,15 +63,19 @@ async def link_github_installation(
         )
 
     # Verify the installation exists on GitHub
-    app_jwt = github_app_auth._create_jwt()
-    client = get_github_client()
-    resp = await client.get(
-        f"https://api.github.com/app/installations/{data.installation_id}",
-        headers={
-            "Authorization": f"Bearer {app_jwt}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
+    try:
+        app_jwt = github_app_auth.create_app_jwt()
+        client = get_github_client()
+        resp = await client.get(
+            f"https://api.github.com/app/installations/{data.installation_id}",
+            headers={
+                "Authorization": f"Bearer {app_jwt}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+    except Exception:
+        logger.exception("Failed to verify installation on GitHub")
+        raise HTTPException(502, "Could not verify installation with GitHub") from None
     if resp.status_code != 200:
         raise HTTPException(400, "Installation not found on GitHub")
     gh_data = resp.json()
@@ -108,6 +118,11 @@ async def get_github_installation(
     current_user: CurrentUser,
 ) -> GitHubAppInstallationResponse | None:
     """Get the GitHub App installation for an organization."""
+    # Require org membership to view installation status
+    is_member = await organization_ops.is_member(db, organization_id, current_user.id)
+    if not is_member:
+        raise HTTPException(403, "Not a member of this organization")
+
     installation = await github_app_installation_ops.get_for_org(db, organization_id)
     if not installation:
         return None
@@ -131,6 +146,11 @@ async def remove_github_installation(
     current_user: CurrentUser,
 ) -> dict:
     """Remove a GitHub App installation record (does not uninstall from GitHub)."""
+    # Require org admin to remove installations
+    role = await organization_ops.get_member_role(db, organization_id, current_user.id)
+    if role not in (MemberRole.OWNER.value, MemberRole.ADMIN.value):
+        raise HTTPException(403, "Admin or owner access required")
+
     installation = await github_app_installation_ops.get_for_org(db, organization_id)
     if installation:
         await github_app_installation_ops.delete_installation(db, installation.id)

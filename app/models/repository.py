@@ -25,6 +25,9 @@ class RepositoryBase(SQLModel):
     stars_count: int | None = Field(default=None)
     forks_count: int | None = Field(default=None)
 
+    # Source type: "github" (default) — extensible for future source types
+    source_type: str = Field(default="github", max_length=20)
+
 
 class RepositoryCreate(SQLModel):
     """Schema for creating a repository."""
@@ -38,6 +41,8 @@ class RepositoryCreate(SQLModel):
     is_private: bool = False
     language: str | None = None
     github_id: int | None = None
+    encrypted_token: str | None = None
+    source_type: str = "github"
 
 
 class RepositoryUpdate(SQLModel):
@@ -71,6 +76,9 @@ class Repository(RepositoryBase, UUIDMixin, TimestampMixin, table=True):
         nullable=False,
         index=True,
     )
+
+    # Per-repo fine-grained token (encrypted with Fernet, for repos linked with their own token)
+    encrypted_token: str | None = Field(default=None, max_length=500)
 
     # Relationships
     product: Optional["Product"] = Relationship(back_populates="repositories")

@@ -34,6 +34,7 @@ from app.services.docs.changelog_agent import ChangelogAgent
 from app.services.docs.codebase_analyzer import CodebaseAnalyzer
 from app.services.docs.document_generator import DocumentGenerator
 from app.services.docs.documentation_planner import DocumentationPlanner
+from app.services.docs.file_source import GitHubServiceFactory
 from app.services.docs.fingerprint import compute_codebase_fingerprint, should_skip_generation
 from app.services.docs.plans_agent import PlansAgent
 from app.services.docs.types import DocsInfo, OrchestratorResult
@@ -71,23 +72,42 @@ class DocumentOrchestrator:
         self,
         db: AsyncSession,
         product: Product,
-        github_service: GitHubService,
+        github_service: GitHubService | None = None,
+        *,
+        github_service_factory: GitHubServiceFactory | None = None,
     ) -> None:
         self.db = db
         self.product = product
-        self.github_service = github_service
+        self._github_service = github_service
+        self._github_service_factory = github_service_factory
 
-        # V2 services
+        # V2 services — prefer per-repo factory for codebase analysis
         self.codebase_analyzer = CodebaseAnalyzer(
-            github_service, token_budget=DEFAULT_ANALYSIS_TOKEN_BUDGET
+            github_service=github_service,
+            token_budget=DEFAULT_ANALYSIS_TOKEN_BUDGET,
+            github_service_factory=github_service_factory,
         )
         self.documentation_planner = DocumentationPlanner()
         self.document_generator = DocumentGenerator(db)
 
-        # V1 sub-agents (legacy, used when use_v2=False)
-        self.changelog_agent = ChangelogAgent(db, product, github_service=github_service)
-        self.blueprint_agent = BlueprintAgent(db, product, github_service)
-        self.plans_agent = PlansAgent(db, product, github_service)
+        # V1 sub-agents use the shared GitHubService (fallback for now).
+        # Per-repo resolution for sub-agents can be added later.
+        if github_service:
+            self.changelog_agent = ChangelogAgent(db, product, github_service=github_service)
+            self.blueprint_agent = BlueprintAgent(db, product, github_service)
+            self.plans_agent = PlansAgent(db, product, github_service)
+        else:
+            self.changelog_agent = ChangelogAgent(db, product)
+            self.blueprint_agent = None  # type: ignore[assignment]
+            self.plans_agent = None  # type: ignore[assignment]
+
+    async def _get_github_service(self, repo: Repository) -> GitHubService:
+        """Get a GitHubService for a specific repo (per-repo token resolution)."""
+        if self._github_service_factory:
+            return await self._github_service_factory(repo)
+        if self._github_service:
+            return self._github_service
+        raise ValueError("No GitHubService or factory configured")
 
     async def run(self, use_v2: bool = True, mode: str = "full") -> OrchestratorResult:
         """
@@ -372,19 +392,20 @@ class DocumentOrchestrator:
         # Each agent checks what exists and fills gaps
 
         # Blueprints (overview, architecture, etc.) - critical for v1
-        await self._update_progress("blueprints", "Generating blueprints...")
-        try:
-            blueprint_result = await self._run_with_timeout(
-                self.blueprint_agent.run(),
-                timeout=AGENT_TIMEOUT_HEAVY,
-                stage_name="Blueprint generation",
-            )
-            results.blueprints.extend(blueprint_result.documents)
-            logger.info(f"Blueprint result: created {blueprint_result.created_count} new docs")
-        except TimeoutError:
-            logger.error("Blueprint generation timed out")
-        except Exception as e:
-            logger.error(f"Blueprint agent failed: {e}")
+        if self.blueprint_agent:
+            await self._update_progress("blueprints", "Generating blueprints...")
+            try:
+                blueprint_result = await self._run_with_timeout(
+                    self.blueprint_agent.run(),
+                    timeout=AGENT_TIMEOUT_HEAVY,
+                    stage_name="Blueprint generation",
+                )
+                results.blueprints.extend(blueprint_result.documents)
+                logger.info(f"Blueprint result: created {blueprint_result.created_count} new docs")
+            except TimeoutError:
+                logger.error("Blueprint generation timed out")
+            except Exception as e:
+                logger.error(f"Blueprint agent failed: {e}")
 
         # Postprocessing: changelog + plans (non-critical)
         await self._run_postprocessing_stages(results)
@@ -419,19 +440,20 @@ class DocumentOrchestrator:
             logger.error(f"Changelog agent failed: {e}")
 
         # Plans organization
-        await self._update_progress("plans", "Organizing plans...")
-        try:
-            plans_result = await self._run_with_timeout(
-                self.plans_agent.run(),
-                timeout=AGENT_TIMEOUT_LIGHT,
-                stage_name="Plans organization",
-            )
-            results.plans_structured = plans_result
-            logger.info(f"Plans result: organized {plans_result.organized_count} plans")
-        except TimeoutError:
-            logger.warning("Plans organization timed out, continuing...")
-        except Exception as e:
-            logger.error(f"Plans agent failed: {e}")
+        if self.plans_agent:
+            await self._update_progress("plans", "Organizing plans...")
+            try:
+                plans_result = await self._run_with_timeout(
+                    self.plans_agent.run(),
+                    timeout=AGENT_TIMEOUT_LIGHT,
+                    stage_name="Plans organization",
+                )
+                results.plans_structured = plans_result
+                logger.info(f"Plans result: organized {plans_result.organized_count} plans")
+            except TimeoutError:
+                logger.warning("Plans organization timed out, continuing...")
+            except Exception as e:
+                logger.error(f"Plans agent failed: {e}")
 
     async def _get_existing_docs(self) -> list[Document]:
         """Get existing GENERATED documents for this product (for gap analysis).
@@ -454,10 +476,9 @@ class DocumentOrchestrator:
         if not repo.full_name:
             return DocsInfo(has_docs_folder=False, has_markdown_files=False, files=[])
 
+        github_service = await self._get_github_service(repo)
         owner, repo_name = repo.full_name.split("/", 1)
-        tree = await self.github_service.get_repo_tree(
-            owner, repo_name, repo.default_branch or "main"
-        )
+        tree = await github_service.get_repo_tree(owner, repo_name, repo.default_branch or "main")
 
         docs_items: list[RepoTreeItem] = []
         for item in tree.all_items:
@@ -483,6 +504,7 @@ class DocumentOrchestrator:
         if not repo.full_name:
             return []
 
+        github_service = await self._get_github_service(repo)
         owner, repo_name = repo.full_name.split("/", 1)
         branch = repo.default_branch or "main"
         imported: list[Document] = []
@@ -492,7 +514,7 @@ class DocumentOrchestrator:
                 continue
 
             try:
-                file_content = await self.github_service.get_file_content(
+                file_content = await github_service.get_file_content(
                     owner, repo_name, item.path, branch
                 )
                 if not file_content:
@@ -589,7 +611,8 @@ class DocumentOrchestrator:
         if not new_full_name and repo_id:
             try:
                 logger.info(f"Resolving GitHub repo ID {repo_id} to get current name...")
-                github_repo = await self.github_service.get_repo_by_id(repo_id)
+                github_service = await self._get_github_service(repo)
+                github_repo = await github_service.get_repo_by_id(repo_id)
                 new_full_name = github_repo.full_name
                 logger.info(f"Resolved repo ID {repo_id} → {new_full_name}")
             except Exception as e:

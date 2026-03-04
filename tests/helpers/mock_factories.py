@@ -70,6 +70,7 @@ def make_mock_subscription(tier: str = "indie", **overrides: object) -> MagicMoc
     sub.cancel_at_period_end = overrides.get("cancel_at_period_end", False)
     sub.current_period_start = overrides.get("current_period_start")
     sub.current_period_end = overrides.get("current_period_end")
+    sub.first_subscribed_at = overrides.get("first_subscribed_at")
     sub.created_at = overrides.get("created_at", datetime.now(UTC))
     sub.updated_at = overrides.get("updated_at")
     return sub
@@ -253,6 +254,24 @@ def make_mock_dashboard_shipped(**overrides: object) -> MagicMock:
     shipped.created_at = overrides.get("created_at", datetime.now(UTC))
     shipped.updated_at = overrides.get("updated_at")
     return shipped
+
+
+def make_mock_discount_code(**overrides: object) -> MagicMock:
+    code = MagicMock()
+    code.id = overrides.get("id", uuid.uuid4())
+    code.code = overrides.get("code", "TEST-DISCOUNT")
+    code.description = overrides.get("description", "Test discount")
+    code.discount_percent = overrides.get("discount_percent", 20)
+    code.max_redemptions = overrides.get("max_redemptions")
+    code.times_redeemed = overrides.get("times_redeemed", 0)
+    code.is_active = overrides.get("is_active", True)
+    code.stripe_coupon_id = overrides.get("stripe_coupon_id")
+    code.duration = overrides.get("duration", "forever")
+    code.duration_in_months = overrides.get("duration_in_months")
+    code.is_beta = overrides.get("is_beta", False)
+    code.created_at = overrides.get("created_at", datetime.now(UTC))
+    code.updated_at = overrides.get("updated_at")
+    return code
 
 
 def make_mock_progress_summary(**overrides: object) -> MagicMock:

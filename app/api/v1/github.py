@@ -3,6 +3,7 @@ GitHub integration endpoints for listing and importing repositories.
 """
 
 import logging
+import re
 import uuid as uuid_pkg
 from dataclasses import asdict
 
@@ -11,14 +12,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    check_product_editor_access,
     get_current_user,
     require_product_subscription,
 )
 from app.api.v1.products.analysis import maybe_auto_trigger_analysis
 from app.api.v1.products.docs_generation import maybe_auto_trigger_docs
 from app.core.database import get_db
+from app.core.encryption import token_encryption
 from app.domain import product_ops, repository_ops
-from app.domain.preferences_operations import preferences_ops
 from app.domain.subscription_operations import subscription_ops
 from app.models.user import User
 from app.services.github import GitHubAPIError, GitHubService
@@ -149,17 +151,48 @@ class BulkRefreshResponse(BaseModel):
     failed: list[FailedRefresh]
 
 
+class LinkRepoRequest(BaseModel):
+    """Request to link a specific GitHub repo with an optional fine-grained token."""
+
+    product_id: uuid_pkg.UUID
+    repo_url: str  # e.g. "https://github.com/owner/repo"
+    token: str | None = None  # Fine-grained PAT (optional for public repos)
+
+
 # --- Helper Functions ---
 
 
-async def get_github_token(db: AsyncSession, user_id: uuid_pkg.UUID) -> str:
+_GITHUB_REPO_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
+
+
+def _parse_github_url(url: str) -> tuple[str, str]:
+    """Extract (owner, repo) from a GitHub URL.
+
+    Raises ValueError if the URL doesn't match the expected pattern.
+    """
+    m = _GITHUB_REPO_URL_RE.match(url.strip())
+    if not m:
+        raise ValueError("Invalid GitHub URL. Expected: https://github.com/owner/repo")
+    return m.group(1), m.group(2)
+
+
+async def get_github_token(
+    db: AsyncSession,
+    user_id: uuid_pkg.UUID,
+    *,
+    organization_id: uuid_pkg.UUID | None = None,
+) -> str:
     """Get GitHub token for user, raising 400 if not configured.
 
-    Uses the TokenResolver which checks GitHub App installation first,
-    then falls back to the user's PAT.
+    When organization_id is provided, checks GitHub App installation for
+    that org first, then falls back to the user's PAT. Without it, checks
+    PAT only (App tokens are org-scoped and can't be resolved without context).
     """
     resolver = TokenResolver(db)
-    token, method = await resolver.resolve_token_for_user(user_id)
+    if organization_id:
+        token, method = await resolver.resolve_token_for_org(organization_id, user_id)
+    else:
+        token, method = await resolver.resolve_token_for_user(user_id)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -199,9 +232,7 @@ async def list_github_repos(
     """
     if organization_id:
         resolver = TokenResolver(db)
-        token, _method = await resolver.resolve_token_for_org(
-            organization_id, current_user.id
-        )
+        token, _method = await resolver.resolve_token_for_org(organization_id, current_user.id)
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -319,7 +350,9 @@ async def import_github_repos(
                 f"You can import {available} more. Upgrade your plan to add more.",
             )
 
-    token = await get_github_token(db, current_user.id)
+    token = await get_github_token(
+        db, current_user.id, organization_id=product.organization_id
+    )
     github = GitHubService(token)
 
     imported: list[ImportedRepo] = []
@@ -464,7 +497,14 @@ async def refresh_repository_metadata(
             detail="Repository missing full_name for GitHub lookup",
         )
 
-    token = await get_github_token(db, current_user.id)
+    # Resolve org context for App token support
+    org_id = None
+    if repo.product_id:
+        product = await product_ops.get(db, repo.product_id)
+        if product:
+            org_id = product.organization_id
+
+    token = await get_github_token(db, current_user.id, organization_id=org_id)
     github = GitHubService(token)
 
     try:
@@ -552,7 +592,9 @@ async def bulk_refresh_github_repos(
 
     await require_product_subscription(db, data.product_id)
 
-    token = await get_github_token(db, current_user.id)
+    token = await get_github_token(
+        db, current_user.id, organization_id=product.organization_id
+    )
     github = GitHubService(token)
 
     # Get all GitHub-linked repos for this product (RLS enforces access)
@@ -635,3 +677,167 @@ async def bulk_refresh_github_repos(
         )
 
     return BulkRefreshResponse(refreshed=refreshed, failed=failed)
+
+
+@router.post("/link-repo", status_code=status.HTTP_201_CREATED)
+async def link_github_repo(
+    data: LinkRepoRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Link a specific GitHub repository using a URL and optional fine-grained token.
+
+    For public repos, the token is optional (validates via unauthenticated API).
+    For private repos, a fine-grained token with Contents read access is required.
+    The token is encrypted and stored per-repository for future access.
+    """
+    # Parse and validate URL
+    try:
+        owner, repo_name = _parse_github_url(data.repo_url)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from None
+
+    # Check product access (editor required)
+    await check_product_editor_access(db, data.product_id, current_user.id)
+
+    # Check subscription limits
+    sub_ctx = await require_product_subscription(db, data.product_id)
+    current_count = await repository_ops.count_by_org(db, sub_ctx.organization.id)
+    limit_status = await subscription_ops.check_repo_limit(
+        db,
+        organization_id=sub_ctx.organization.id,
+        current_repo_count=current_count,
+        additional_count=1,
+    )
+    if not limit_status.can_add:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Repository limit reached ({limit_status.base_limit}). "
+            "Upgrade your plan to add more repositories.",
+        )
+
+    # Validate access and fetch metadata
+    if data.token:
+        # Validate the provided token can access this repo
+        github = GitHubService(data.token)
+        try:
+            fresh_data = await github.get_repo_details(owner, repo_name)
+        except GitHubAPIError as e:
+            if e.status_code == 401:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Token is invalid or expired.",
+                ) from None
+            if e.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Token cannot access this repository. "
+                    "Ensure the token has Contents read permission.",
+                ) from None
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"GitHub API error: {e.message}",
+            ) from None
+    else:
+        # No token — try unauthenticated access (public repos only)
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo_name}",
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Repository not found or is private. "
+                    "Provide a fine-grained token for private repos.",
+                )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"GitHub API returned {resp.status_code}",
+                )
+            gh_data = resp.json()
+
+        # Build a minimal data object matching GitHubRepo fields
+        from types import SimpleNamespace
+
+        fresh_data = SimpleNamespace(
+            name=gh_data["name"],
+            full_name=gh_data["full_name"],
+            description=gh_data.get("description"),
+            url=gh_data["html_url"],
+            default_branch=gh_data.get("default_branch", "main"),
+            is_private=gh_data.get("private", False),
+            language=gh_data.get("language"),
+            github_id=gh_data["id"],
+            stars_count=gh_data.get("stargazers_count", 0),
+            forks_count=gh_data.get("forks_count", 0),
+        )
+
+    # Check for duplicate: same repo already linked to this product
+    existing = await repository_ops.get_by_github_id(
+        db, data.product_id, fresh_data.github_id
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository {fresh_data.full_name} is already linked to this product.",
+        )
+
+    # Create repository record
+    encrypted_token = token_encryption.encrypt(data.token) if data.token else None
+
+    repo = await repository_ops.create(
+        db,
+        obj_in={
+            "product_id": data.product_id,
+            "name": fresh_data.name,
+            "full_name": fresh_data.full_name,
+            "description": fresh_data.description,
+            "url": fresh_data.url,
+            "default_branch": fresh_data.default_branch,
+            "is_private": fresh_data.is_private,
+            "language": fresh_data.language,
+            "github_id": fresh_data.github_id,
+            "stars_count": fresh_data.stars_count,
+            "forks_count": fresh_data.forks_count,
+            "encrypted_token": encrypted_token,
+        },
+        imported_by_user_id=current_user.id,
+    )
+
+    await db.commit()
+
+    # Auto-trigger docs + analysis
+    docs_triggered = False
+    analysis_triggered = False
+    try:
+        docs_triggered = await maybe_auto_trigger_docs(
+            product_id=data.product_id,
+            user_id=current_user.id,
+            db=db,
+        )
+    except Exception as e:
+        logger.warning(f"Auto-trigger docs failed after link-repo: {e}")
+
+    try:
+        analysis_triggered = await maybe_auto_trigger_analysis(
+            product_id=data.product_id,
+            user_id=current_user.id,
+            db=db,
+        )
+    except Exception as e:
+        logger.warning(f"Auto-trigger analysis failed after link-repo: {e}")
+
+    from app.api.v1.repositories import _serialize_repository
+
+    result = _serialize_repository(repo)
+    result["docs_generation_triggered"] = docs_triggered
+    result["analysis_triggered"] = analysis_triggered
+    return result

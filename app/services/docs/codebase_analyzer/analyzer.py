@@ -22,6 +22,7 @@ from app.services.docs.codebase_analyzer.endpoints import extract_endpoints
 from app.services.docs.codebase_analyzer.models import extract_models
 from app.services.docs.codebase_analyzer.patterns import detect_patterns
 from app.services.docs.codebase_analyzer.tech_stack import detect_tech_stack
+from app.services.docs.file_source import GitHubServiceFactory
 from app.services.docs.types import (
     CodebaseContext,
     EndpointInfo,
@@ -47,11 +48,22 @@ class CodebaseAnalyzer:
 
     def __init__(
         self,
-        github_service: GitHubService,
+        github_service: GitHubService | None = None,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
+        *,
+        github_service_factory: GitHubServiceFactory | None = None,
     ) -> None:
-        self.github_service = github_service
+        self._github_service = github_service
+        self._github_service_factory = github_service_factory
         self.token_budget = token_budget
+
+    async def _get_github_service(self, repo: Repository) -> GitHubService:
+        """Get a GitHubService for a specific repo (per-repo token resolution)."""
+        if self._github_service_factory:
+            return await self._github_service_factory(repo)
+        if self._github_service:
+            return self._github_service
+        raise ValueError("No GitHubService or factory configured")
 
     async def analyze(self, repos: list[Repository]) -> CodebaseContext:
         """
@@ -102,9 +114,12 @@ class CodebaseAnalyzer:
 
         errors: list[str] = []
 
+        # Resolve per-repo GitHub service
+        github_service = await self._get_github_service(repo)
+
         # Fetch file tree
         try:
-            tree = await self.github_service.get_repo_tree(owner, repo_name, branch)
+            tree = await github_service.get_repo_tree(owner, repo_name, branch)
         except Exception as e:
             logger.error(f"Failed to get tree for {repo.full_name}: {e}")
             return RepoAnalysis(
@@ -122,7 +137,7 @@ class CodebaseAnalyzer:
 
         # Select and fetch files with priority tiers
         key_files = await self._fetch_prioritized_files(
-            owner, repo_name, branch, tree, token_budget
+            github_service, owner, repo_name, branch, tree, token_budget
         )
 
         # Detect tech stack from file contents
@@ -150,6 +165,7 @@ class CodebaseAnalyzer:
 
     async def _fetch_prioritized_files(
         self,
+        github_service: GitHubService,
         owner: str,
         repo: str,
         branch: str,
@@ -183,7 +199,7 @@ class CodebaseAnalyzer:
         remaining_budget = token_budget
 
         # Fetch Tier 1 (always)
-        t1_contents = await self.github_service.fetch_files_by_paths(
+        t1_contents = await github_service.fetch_files_by_paths(
             owner, repo, tier_1_files, branch, max_size=MAX_FILE_SIZE
         )
         for path, content in t1_contents.items():
@@ -206,7 +222,7 @@ class CodebaseAnalyzer:
             max_tier_2 = min(len(tier_2_files), remaining_budget // 500)
             t2_to_fetch = tier_2_files[:max_tier_2]
 
-            t2_contents = await self.github_service.fetch_files_by_paths(
+            t2_contents = await github_service.fetch_files_by_paths(
                 owner, repo, t2_to_fetch, branch, max_size=MAX_FILE_SIZE
             )
             for path, content in t2_contents.items():

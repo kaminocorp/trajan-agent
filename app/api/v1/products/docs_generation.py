@@ -14,18 +14,51 @@ from app.api.deps import (
     get_db_with_rls,
     require_product_subscription,
 )
-from app.domain import product_ops
+from app.domain import github_app_installation_ops, product_ops, repository_ops
 from app.domain.organization_operations import organization_ops
 from app.domain.preferences_operations import preferences_ops
 from app.domain.product_access_operations import product_access_ops
 from app.models.user import User
 from app.schemas.docs import DocsStatusResponse, GenerateDocsRequest, GenerateDocsResponse
+from app.services.github.app_auth import github_app_auth
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Stale job detection: mark as failed if generating for longer than this
 DOCS_GENERATION_TIMEOUT_MINUTES = 15
+
+
+async def _has_github_access(
+    db: AsyncSession,
+    product_id: uuid_pkg.UUID,
+    user_id: uuid_pkg.UUID,
+) -> bool:
+    """Check if there's any form of GitHub access for this product's repos.
+
+    Returns True if any of these exist:
+    1. User has a PAT in preferences
+    2. Product's org has an active GitHub App installation
+    3. Any repo in the product has a per-repo fine-grained token
+    """
+    # 1. User has PAT
+    prefs = await preferences_ops.get_by_user_id(db, user_id)
+    if prefs and preferences_ops.get_decrypted_token(prefs):
+        return True
+
+    # 2. Product's org has GitHub App installation
+    if github_app_auth.is_configured:
+        product = await product_ops.get(db, product_id)
+        if product and product.organization_id:
+            installation = await github_app_installation_ops.get_for_org(
+                db, product.organization_id
+            )
+            if installation and not installation.suspended_at:
+                return True
+
+    # 3. Any repo has a per-repo token
+    repos = await repository_ops.get_by_product(db, product_id)
+    return any(getattr(repo, "encrypted_token", None) for repo in repos)
 
 
 @router.post("/{product_id}/generate-docs", response_model=GenerateDocsResponse)
@@ -60,13 +93,13 @@ async def generate_documentation(
             message="Documentation generation already in progress",
         )
 
-    # Get user's GitHub token from preferences (check existence only - token fetched in background task)
-    prefs = await preferences_ops.get_by_user_id(db, user_id=current_user.id)
-    if not prefs or not preferences_ops.get_decrypted_token(prefs):
+    # Check that at least one form of GitHub access exists (PAT, App, or per-repo token).
+    # The background task uses TokenResolver to resolve the best token per-repo.
+    if not await _has_github_access(db, product_id, current_user.id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token required for documentation generation. "
-            "Configure it in Settings → General.",
+            detail="No GitHub access configured. Install the GitHub App, "
+            "add a Personal Access Token, or link repos with a fine-grained token.",
         )
 
     # Parse mode from request (default to "full")
@@ -336,9 +369,9 @@ async def maybe_auto_trigger_docs(
     if not prefs.auto_generate_docs:
         return False
 
-    # 2. Check GitHub token exists (required by the orchestrator)
-    if not preferences_ops.get_decrypted_token(prefs):
-        logger.debug(f"Skipping auto-trigger for product {product_id}: no GitHub token configured")
+    # 2. Check any form of GitHub access exists (PAT, App installation, or per-repo token)
+    if not await _has_github_access(db, product_id, user_id):
+        logger.debug(f"Skipping auto-trigger for product {product_id}: no GitHub access configured")
         return False
 
     # 3. Check product is not already generating
@@ -395,7 +428,10 @@ async def run_document_orchestrator(
     """
     from app.core.database import async_session_maker
     from app.services.docs import DocumentOrchestrator
-    from app.services.github import GitHubService
+    from app.services.docs.file_source import (
+        create_github_service_factory,
+        get_fallback_github_service,
+    )
 
     async with async_session_maker() as db:
         try:
@@ -408,19 +444,20 @@ async def run_document_orchestrator(
                 logger.warning(f"Product {product_id} not found for docs generation")
                 return
 
-            # Get GitHub token from user preferences (decrypted)
-            prefs = await preferences_ops.get_by_user_id(db, user_id=user_uuid)
-            github_token = preferences_ops.get_decrypted_token(prefs) if prefs else None
-            if not github_token:
-                product.docs_generation_status = "failed"
-                product.docs_generation_error = "GitHub token not found"
-                await db.commit()
-                return
+            # Create per-repo token resolution factory
+            # This allows each repo to use its own token (per-repo, App, or PAT)
+            factory = await create_github_service_factory(db, user_uuid)
 
-            github_service = GitHubService(github_token)
+            # Get fallback service for sub-agents that haven't been refactored
+            fallback_service = await get_fallback_github_service(db, user_uuid)
 
-            # Run orchestrator with specified mode
-            orchestrator = DocumentOrchestrator(db, product, github_service)
+            # Run orchestrator with per-repo factory + optional fallback
+            orchestrator = DocumentOrchestrator(
+                db,
+                product,
+                github_service=fallback_service,
+                github_service_factory=factory,
+            )
             await orchestrator.run(mode=mode)
 
             # Update status on success using fresh session to avoid statement timeout
