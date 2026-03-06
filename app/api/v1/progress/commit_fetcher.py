@@ -153,6 +153,9 @@ async def fetch_product_commits(
                 commit_sha=commit["sha"],
                 commit_message=commit["commit"]["message"].split("\n")[0][:100],
                 commit_author=commit["commit"]["author"]["name"],
+                commit_author_login=(
+                    commit["author"]["login"] if commit.get("author") else None
+                ),
                 commit_author_avatar=(
                     commit["author"]["avatar_url"] if commit.get("author") else None
                 ),

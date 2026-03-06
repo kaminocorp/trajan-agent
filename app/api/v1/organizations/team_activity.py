@@ -183,6 +183,7 @@ async def get_team_activity(
                     "files_changed": 0,
                     "last_active": None,
                     "avatar_url": None,
+                    "github_login": None,
                     "daily_activities": [],
                     "focus_area_counts": defaultdict(int),
                     "products": [],
@@ -196,9 +197,11 @@ async def get_team_activity(
             data["deletions"] += sum(e.deletions or 0 for e in author_events)
             data["files_changed"] += sum(e.files_changed or 0 for e in author_events)
 
-            # Avatar
+            # Avatar and GitHub login
             if not data["avatar_url"] and author_events:
                 data["avatar_url"] = author_events[0].commit_author_avatar
+            if not data["github_login"] and author_events:
+                data["github_login"] = author_events[0].commit_author_login
 
             # Last active (newest timestamp)
             author_events.sort(key=lambda e: e.timestamp, reverse=True)
@@ -247,7 +250,9 @@ async def get_team_activity(
                 )
 
     # 4. Build final stats per contributor
-    contributor_stats: dict[str, tuple[TeamMemberStats, list[TeamMemberRecentCommit], str | None]] = {}
+    contributor_stats: dict[
+        str, tuple[TeamMemberStats, list[TeamMemberRecentCommit], str | None, str | None]
+    ] = {}
 
     for author, data in author_data.items():
         # Merge daily activity
@@ -274,7 +279,7 @@ async def get_team_activity(
             focus_areas=focus_areas,
             products=data["products"],
         )
-        contributor_stats[author] = (stats, all_recent, data["avatar_url"])
+        contributor_stats[author] = (stats, all_recent, data["avatar_url"], data["github_login"])
 
     # 5. Fetch org members and join with contributor data
     org_members = await org_member_ops.get_by_org(db, org_id)
@@ -300,7 +305,7 @@ async def get_team_activity(
     matched_member_ids: set[str] = set()
     team_members: list[TeamMember] = []
 
-    for author, (stats, recent_commits, avatar_url) in contributor_stats.items():
+    for author, (stats, recent_commits, avatar_url, github_login) in contributor_stats.items():
         matched = _match_contributor_to_member(author, member_map)
         if matched:
             uid = matched["user_id"]
@@ -335,7 +340,7 @@ async def get_team_activity(
                     status="active",
                     stats=stats,
                     recent_commits=recent_commits,
-                    github_username=None,
+                    github_username=github_login,
                     github_author=author,
                     is_linked=False,
                 )
