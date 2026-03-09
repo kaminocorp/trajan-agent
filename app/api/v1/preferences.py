@@ -26,6 +26,7 @@ class PreferencesRead(BaseModel):
     github_setup_dismissed: bool
     github_connect_modal_dismissed: bool
     invite_box_dismissed: bool
+    getting_started_dismissed: bool
 
     class Config:
         from_attributes = True
@@ -43,6 +44,7 @@ class PreferencesUpdate(BaseModel):
     github_setup_dismissed: bool | None = None
     github_connect_modal_dismissed: bool | None = None
     invite_box_dismissed: bool | None = None
+    getting_started_dismissed: bool | None = None
 
 
 class GitHubTokenTest(BaseModel):
@@ -75,6 +77,7 @@ def prefs_to_response(prefs: UserPreferences) -> dict:
         "github_setup_dismissed": prefs.github_setup_dismissed,
         "github_connect_modal_dismissed": prefs.github_connect_modal_dismissed,
         "invite_box_dismissed": prefs.invite_box_dismissed,
+        "getting_started_dismissed": prefs.getting_started_dismissed,
     }
 
 

@@ -48,6 +48,7 @@ class UserPreferences(SQLModel, table=True):
     github_setup_dismissed: bool = Field(default=False)
     github_connect_modal_dismissed: bool = Field(default=False)
     invite_box_dismissed: bool = Field(default=False)
+    getting_started_dismissed: bool = Field(default=False)
 
     # Timestamps
     created_at: datetime = Field(  # type: ignore[call-overload]
