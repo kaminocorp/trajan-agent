@@ -9,7 +9,6 @@ from app.api.v1 import (
     products,
     progress,
     public_tickets,
-    quick_access,
     repositories,
     timeline,
     users,
@@ -31,5 +30,4 @@ __all__ = [
     "timeline",
     "progress",
     "public_tickets",
-    "quick_access",
 ]

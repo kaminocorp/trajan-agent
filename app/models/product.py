@@ -143,32 +143,6 @@ class Product(ProductBase, UUIDMixin, TimestampMixin, UserOwnedMixin, table=True
         },
     )
 
-    # Quick Access fields - allows password-protected shareable link to App Info
-    quick_access_enabled: bool = Field(
-        default=False,
-        sa_column_kwargs={"comment": "Whether quick access link is active"},
-    )
-    quick_access_token: str | None = Field(
-        default=None,
-        max_length=64,
-        unique=True,
-        index=True,
-        sa_column_kwargs={"comment": "URL-safe token for quick access link"},
-    )
-    quick_access_created_at: datetime | None = Field(
-        default=None,
-        sa_column=Column(
-            DateTime(timezone=True),
-            nullable=True,
-            comment="When quick access was enabled",
-        ),
-    )
-    quick_access_created_by: uuid_pkg.UUID | None = Field(
-        default=None,
-        foreign_key="users.id",
-        sa_column_kwargs={"comment": "User who enabled quick access"},
-    )
-
     # Relationships
     user: Optional["User"] = Relationship(
         back_populates="products",

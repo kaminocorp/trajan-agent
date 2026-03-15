@@ -169,8 +169,8 @@ class AppInfoOperations(BaseOperations[AppInfo]):
         """
         Get app info entries for a product (org-level access).
 
-        Does NOT filter by user_id - used for quick access where any org member
-        can view entries created by any other org member.
+        Does NOT filter by user_id - any org member can view entries
+        created by any other org member.
 
         Args:
             tags: Filter by tags. Returns entries that have ALL specified tags (AND logic).
@@ -207,7 +207,7 @@ class AppInfoOperations(BaseOperations[AppInfo]):
         """
         Get a single app info entry by ID within a product (org-level access).
 
-        Does NOT filter by user_id - used for quick access reveal.
+        Does NOT filter by user_id - org-level access.
         """
         statement = select(AppInfo).where(
             AppInfo.id == entry_id,  # type: ignore[arg-type]

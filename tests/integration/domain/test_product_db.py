@@ -1,7 +1,7 @@
 """DB integration tests for ProductOperations.
 
 Tests real SQL execution against PostgreSQL via the rollback fixture.
-Covers: CRUD, eager loading, quick access, org scoping, and user scoping.
+Covers: CRUD, eager loading, org scoping, and user scoping.
 """
 
 from __future__ import annotations
@@ -122,47 +122,3 @@ class TestProductRelations:
         loaded = await product_ops.get_with_relations_by_id(db_session, test_product.id)
         assert loaded is not None
         assert loaded.id == test_product.id
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Quick access
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestQuickAccess:
-    """Test quick access token lifecycle."""
-
-    async def test_enable_disable_quick_access(
-        self, db_session: AsyncSession, test_user, test_product
-    ):
-        """Enable generates a token; disable keeps it but marks disabled."""
-        # Enable
-        product = await product_ops.enable_quick_access(db_session, test_product, test_user.id)
-        assert product.quick_access_enabled is True
-        assert product.quick_access_token is not None
-        token = product.quick_access_token
-
-        # Can retrieve by token
-        found = await product_ops.get_by_quick_access_token(db_session, token)
-        assert found is not None
-        assert found.id == product.id
-
-        # Disable
-        product = await product_ops.disable_quick_access(db_session, product)
-        assert product.quick_access_enabled is False
-        assert product.quick_access_token == token  # Token preserved
-
-        # Token lookup returns None when disabled
-        found = await product_ops.get_by_quick_access_token(db_session, token)
-        assert found is None
-
-    async def test_regenerate_quick_access_token(
-        self, db_session: AsyncSession, test_user, test_product
-    ):
-        """Regenerating creates a new token, invalidating the old one."""
-        product = await product_ops.enable_quick_access(db_session, test_product, test_user.id)
-        old_token = product.quick_access_token
-
-        product = await product_ops.regenerate_quick_access_token(db_session, product, test_user.id)
-        assert product.quick_access_token != old_token
-        assert product.quick_access_token is not None
