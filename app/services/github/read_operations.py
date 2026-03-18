@@ -91,6 +91,65 @@ class GitHubReadOperations:
             license_name=license_name,
         )
 
+    async def get_installation_repos(
+        self,
+        page: int = 1,
+        per_page: int = 30,
+    ) -> GitHubReposResponse:
+        """
+        Fetch repositories accessible to a GitHub App installation.
+
+        Uses GET /installation/repositories — the correct endpoint for
+        App installation tokens. Unlike /user/repos, this endpoint only
+        supports page/per_page params (no sort, visibility, or affiliation).
+
+        Args:
+            page: Page number (1-indexed)
+            per_page: Items per page (max 100)
+
+        Returns:
+            GitHubReposResponse with repos and pagination info
+        """
+        params: dict[str, str | int] = {
+            "page": page,
+            "per_page": min(per_page, 100),
+        }
+
+        client = get_github_client()
+        response = await client.get(
+            f"{self.BASE_URL}/installation/repositories",
+            headers=self._headers,
+            params=params,
+        )
+
+        rate_info = RateLimitInfo(response)
+
+        if response.status_code == 401:
+            raise GitHubAPIError("Invalid or expired GitHub token", 401)
+        elif response.status_code == 403:
+            if rate_info.is_exhausted:
+                raise GitHubAPIError(
+                    "GitHub API rate limit exceeded",
+                    403,
+                    rate_limit_reset=rate_info.reset_timestamp,
+                )
+            raise GitHubAPIError("GitHub API forbidden", 403)
+        elif response.status_code != 200:
+            raise GitHubAPIError(f"GitHub API error: {response.status_code}", response.status_code)
+
+        data = response.json()
+        repos = [self._normalize_repo(r) for r in data.get("repositories", [])]
+
+        link_header = response.headers.get("Link", "")
+        has_more = 'rel="next"' in link_header
+
+        return GitHubReposResponse(
+            repos=repos,
+            total_count=data.get("total_count", len(repos)),
+            has_more=has_more,
+            rate_limit_remaining=int(rate_info.remaining) if rate_info.remaining else None,
+        )
+
     async def get_user_repos(
         self,
         page: int = 1,

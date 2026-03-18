@@ -230,9 +230,12 @@ async def list_github_repos(
     When organization_id is provided, attempts to use the org's GitHub App
     installation token first, falling back to the user's PAT.
     """
+    token_method = "pat"
     if organization_id:
         resolver = TokenResolver(db)
-        token, _method = await resolver.resolve_token_for_org(organization_id, current_user.id)
+        token, token_method = await resolver.resolve_token_for_org(
+            organization_id, current_user.id
+        )
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -244,12 +247,20 @@ async def list_github_repos(
     github = GitHubService(token)
 
     try:
-        result = await github.get_user_repos(
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            visibility=visibility,
-        )
+        if token_method == "github_app":
+            # App installation tokens cannot access /user/repos — use
+            # the installation-scoped endpoint instead.
+            result = await github.get_installation_repos(
+                page=page,
+                per_page=per_page,
+            )
+        else:
+            result = await github.get_user_repos(
+                page=page,
+                per_page=per_page,
+                sort=sort,
+                visibility=visibility,
+            )
     except GitHubAPIError as e:
         detail = e.message
         if e.rate_limit_reset:
@@ -353,21 +364,37 @@ async def import_github_repos(
                 f"You can import {available} more. Upgrade your plan to add more.",
             )
 
-    token = await get_github_token(db, current_user.id, organization_id=product.organization_id)
+    resolver = TokenResolver(db)
+    if product.organization_id:
+        token, import_token_method = await resolver.resolve_token_for_org(
+            product.organization_id, current_user.id
+        )
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GitHub is not connected. Please install the GitHub App "
+                "or add a Personal Access Token in Settings.",
+            )
+    else:
+        token = await get_github_token(db, current_user.id)
+        import_token_method = "pat"
     github = GitHubService(token)
 
     imported: list[ImportedRepo] = []
     skipped: list[SkippedRepo] = []
 
-    # Fetch user repos once upfront to avoid N+1 API calls.
-    # This may fail when using a GitHub App installation token (which can't
-    # access /user/repos). In that case, fall through to per-repo fetches.
+    # Pre-fetch repos to avoid N+1 API calls. Use the correct endpoint
+    # based on the token type: App tokens use /installation/repositories,
+    # PATs use /user/repos.
     repos_by_id: dict[int, object] = {}
     try:
-        user_repos = await github.get_user_repos(per_page=100, visibility="all")
-        repos_by_id = {r.github_id: r for r in user_repos.repos}
+        if import_token_method == "github_app":
+            pre_fetch = await github.get_installation_repos(per_page=100)
+        else:
+            pre_fetch = await github.get_user_repos(per_page=100, visibility="all")
+        repos_by_id = {r.github_id: r for r in pre_fetch.repos}
     except GitHubAPIError:
-        logger.debug("Pre-fetch of user repos failed (likely App token); will fetch individually")
+        logger.debug("Pre-fetch of repos failed; will fetch individually")
 
     for github_id in data.github_ids:
         # Check if already imported to this specific product

@@ -88,6 +88,14 @@ class GitHubService(GitHubReadOperations, GitHubWriteOperations):
         GitHubWriteOperations.__init__(self, token)
 
     # Re-export type hints for IDE support
+    async def get_installation_repos(
+        self,
+        page: int = 1,
+        per_page: int = 30,
+    ) -> GitHubReposResponse:
+        """Fetch repositories accessible to a GitHub App installation."""
+        return await GitHubReadOperations.get_installation_repos(self, page, per_page)
+
     async def get_user_repos(
         self,
         page: int = 1,
