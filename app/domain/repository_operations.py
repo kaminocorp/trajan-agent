@@ -140,7 +140,7 @@ class RepositoryOperations:
             select(Repository)
             .where(
                 Repository.product_id == product_id,
-                Repository.github_id.isnot(None),
+                Repository.github_id.isnot(None),  # type: ignore[union-attr]
             )
             .order_by(Repository.created_at.desc())
         )

@@ -21,6 +21,7 @@ from app.services.github.types import (
     GitHubRepo,
     GitHubReposResponse,
     LanguageStat,
+    PullRequestInfo,
     RepoContext,
     RepoFile,
     RepoTree,
@@ -71,6 +72,9 @@ class GitHubService(GitHubReadOperations, GitHubWriteOperations):
     Write operations (from GitHubWriteOperations):
         - create_commit
         - get_file_sha
+        - branch_exists
+        - create_branch
+        - create_pull_request
     """
 
     BASE_URL = "https://api.github.com"
@@ -227,3 +231,33 @@ class GitHubService(GitHubReadOperations, GitHubWriteOperations):
     ) -> str | None:
         """Get the SHA of a specific file in the repository."""
         return await GitHubWriteOperations.get_file_sha(self, owner, repo, path, branch)
+
+    async def branch_exists(self, owner: str, repo: str, branch: str) -> bool:
+        """Check whether a branch exists in the repository."""
+        return await GitHubWriteOperations.branch_exists(self, owner, repo, branch)
+
+    async def create_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        from_branch: str = "main",
+    ) -> str:
+        """Create a new branch from an existing branch. Idempotent."""
+        return await GitHubWriteOperations.create_branch(
+            self, owner, repo, branch, from_branch
+        )
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> PullRequestInfo:
+        """Create a pull request, or return existing if one already exists."""
+        return await GitHubWriteOperations.create_pull_request(
+            self, owner, repo, title, body, head, base
+        )

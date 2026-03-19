@@ -109,7 +109,7 @@ class DocumentationPlanner:
         prompt = self._build_prompt(context, existing_docs, mode)
         tool_schema = self._build_tool_schema()
 
-        async def _do_call() -> PlannerResult:
+        async def _do_call() -> DocumentationPlan:
             response = await self.client.messages.create(
                 model=MODEL_OPUS,
                 max_tokens=8000,

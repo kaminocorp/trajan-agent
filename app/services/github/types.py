@@ -96,6 +96,18 @@ class CommitStats:
 
 
 @dataclass
+class PullRequestInfo:
+    """Information about a created or existing pull request."""
+
+    number: int
+    url: str  # API URL
+    html_url: str  # Browser URL
+    head: str  # Source branch
+    base: str  # Target branch
+    state: str  # "open", "closed", "merged"
+
+
+@dataclass
 class RepoContext:
     """Aggregated context for a repository, used for AI analysis."""
 

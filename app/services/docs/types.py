@@ -100,6 +100,9 @@ class SyncResult:
     files_synced: int = 0
     errors: list[str] = field(default_factory=list)
     commit_sha: str | None = None
+    branch: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
 
 
 @dataclass

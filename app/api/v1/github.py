@@ -26,6 +26,7 @@ from app.models.user import User
 from app.services.github import GitHubAPIError, GitHubService
 from app.services.github.exceptions import GitHubRepoRenamed
 from app.services.github.token_resolver import TokenResolver
+from app.services.github.types import GitHubRepo
 
 router = APIRouter(prefix="/github", tags=["github"])
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 async def resolve_renamed_repo(
     github: GitHubService,
     rename_exc: GitHubRepoRenamed,
-) -> object:
+) -> GitHubRepo:
     """Resolve a renamed GitHub repo and fetch fresh details.
 
     Given a GitHubRepoRenamed exception (which may contain a new_full_name
@@ -804,10 +805,8 @@ async def link_github_repo(
                 )
             gh_data = resp.json()
 
-        # Build a minimal data object matching GitHubRepo fields
-        from types import SimpleNamespace
-
-        fresh_data = SimpleNamespace(
+        # Build a GitHubRepo from the raw API response
+        fresh_data = GitHubRepo(
             name=gh_data["name"],
             full_name=gh_data["full_name"],
             description=gh_data.get("description"),
@@ -818,6 +817,7 @@ async def link_github_repo(
             github_id=gh_data["id"],
             stars_count=gh_data.get("stargazers_count", 0),
             forks_count=gh_data.get("forks_count", 0),
+            updated_at=gh_data.get("updated_at", ""),
         )
 
     # Check for duplicate: same repo already linked to this product

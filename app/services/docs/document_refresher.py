@@ -96,9 +96,7 @@ class DocumentRefresher:
         try:
             # Get codebase context if not provided
             if codebase_context is None:
-                codebase_context = await self.codebase_analyzer.analyze(
-                    repos, token_budget=MAX_CONTEXT_TOKENS
-                )
+                codebase_context = await self.codebase_analyzer.analyze(repos)
 
             # Extract relevant files for this document
             relevant_files = self._extract_relevant_files(document, codebase_context)
@@ -170,9 +168,7 @@ class DocumentRefresher:
 
         # Compute codebase context once for all documents
         try:
-            codebase_context = await self.codebase_analyzer.analyze(
-                repos, token_budget=MAX_CONTEXT_TOKENS
-            )
+            codebase_context = await self.codebase_analyzer.analyze(repos)
         except Exception as e:
             logger.error(f"Failed to analyze codebase for refresh: {e}")
             return BulkRefreshResult(

@@ -1,7 +1,7 @@
 """Pydantic schemas for documentation endpoints."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -97,6 +97,9 @@ class SyncDocsResponse(BaseModel):
     success: bool
     files_synced: int
     commit_sha: str | None = None
+    branch: str | None = None
+    pr_url: str | None = None
+    pr_number: int | None = None
     errors: list[str] = []
 
 
@@ -116,6 +119,28 @@ class DocsSyncStatusResponse(BaseModel):
     documents: list[DocumentSyncStatusResponse]
     has_local_changes: bool
     has_remote_changes: bool
+
+
+class SyncConfigResponse(BaseModel):
+    """Response for GET /repositories/{id}/sync-config."""
+
+    sync_enabled: bool
+    sync_branch: str | None = None
+    sync_path_prefix: str = "docs/"
+    sync_create_pr: bool = True
+    sync_doc_filter: dict[str, Any] | None = None
+    last_sync_commit_sha: str | None = None
+    last_sync_pr_url: str | None = None
+
+
+class SyncConfigUpdate(BaseModel):
+    """Request body for PATCH /repositories/{id}/sync-config."""
+
+    sync_enabled: bool | None = None
+    sync_branch: str | None = Field(None, max_length=255)
+    sync_path_prefix: str | None = Field(None, max_length=255)
+    sync_create_pr: bool | None = None
+    sync_doc_filter: dict[str, Any] | None = None
 
 
 class PullRemoteRequest(BaseModel):

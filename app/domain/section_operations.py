@@ -211,9 +211,9 @@ class SectionOperations:
                 )
 
             # Re-fetch to get subsections
-            section = await self.get(db, section.id)
-            if section:
-                created_sections.append(section)
+            refreshed = await self.get(db, section.id)
+            if refreshed:
+                created_sections.append(refreshed)
 
         return created_sections
 
