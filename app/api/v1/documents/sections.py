@@ -196,8 +196,8 @@ async def create_section(
     await db.commit()
 
     # Re-fetch to get subsections (empty for new section)
-    section = await section_ops.get(db, section.id)
-    return serialize_section(section)
+    refreshed = await section_ops.get(db, section.id)
+    return serialize_section(refreshed)
 
 
 async def update_section(

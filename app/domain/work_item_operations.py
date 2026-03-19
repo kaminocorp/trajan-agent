@@ -41,7 +41,7 @@ class WorkItemOperations:
         """
         statement = select(WorkItem).where(
             WorkItem.product_id == product_id,
-            WorkItem.deleted_at.is_(None),
+            WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
         )
 
         if status:
@@ -68,7 +68,7 @@ class WorkItemOperations:
         When org_id is provided, only returns work items for products
         belonging to that organization (prevents cross-tenancy bleed).
         """
-        statement = select(WorkItem).where(WorkItem.deleted_at.is_(None))
+        statement = select(WorkItem).where(WorkItem.deleted_at.is_(None))  # type: ignore[union-attr]
 
         if org_id:
             statement = statement.join(Product, WorkItem.product_id == Product.id).where(

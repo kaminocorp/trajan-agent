@@ -1,7 +1,8 @@
 import uuid as uuid_pkg
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Index
+from sqlalchemy import Column, Index
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, Relationship, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
@@ -81,6 +82,17 @@ class Repository(RepositoryBase, UUIDMixin, TimestampMixin, table=True):
 
     # Per-repo fine-grained token (encrypted with Fernet, for repos linked with their own token)
     encrypted_token: str | None = Field(default=None, max_length=500)
+
+    # Sync configuration — controls outbound doc sync to GitHub
+    sync_enabled: bool = Field(default=False)
+    sync_branch: str | None = Field(default=None, max_length=255)
+    sync_path_prefix: str = Field(default="docs/", max_length=255)
+    sync_create_pr: bool = Field(default=True)
+    sync_doc_filter: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
+    last_sync_commit_sha: str | None = Field(default=None, max_length=40)
+    last_sync_pr_url: str | None = Field(default=None, max_length=500)
 
     # Relationships
     product: Optional["Product"] = Relationship(back_populates="repositories")

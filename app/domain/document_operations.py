@@ -120,7 +120,7 @@ class DocumentOperations:
         result = await db.execute(
             select(Document)
             .where(Document.product_id == product_id)
-            .where(Document.folder["path"].astext == folder_path)
+            .where(Document.folder["path"].astext == folder_path)  # type: ignore[index]
             .order_by(Document.updated_at.desc())
         )
         return list(result.scalars().all())
@@ -148,7 +148,7 @@ class DocumentOperations:
         result = await db.execute(
             select(Document)
             .where(Document.product_id == product_id)
-            .where(Document.github_path.isnot(None))
+            .where(Document.github_path.isnot(None))  # type: ignore[union-attr]
             .order_by(Document.updated_at.desc())
         )
         return list(result.scalars().all())

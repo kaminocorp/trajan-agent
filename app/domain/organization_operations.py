@@ -352,7 +352,7 @@ class OrganizationOperations:
     ) -> list[Organization]:
         """Get all organizations that have auto-progress enabled."""
         statement = select(Organization).where(
-            Organization.settings["auto_progress_enabled"].as_boolean().is_(True)
+            Organization.settings["auto_progress_enabled"].as_boolean().is_(True)  # type: ignore[index]
         )
         result = await db.execute(statement)
         return list(result.scalars().all())

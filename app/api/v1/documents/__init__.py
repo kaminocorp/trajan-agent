@@ -56,9 +56,11 @@ from app.api.v1.documents.sections import (
 )
 from app.api.v1.documents.sync import (
     get_docs_sync_status,
+    get_sync_config,
     import_docs_from_repo,
     pull_remote_changes,
     sync_docs_to_repo,
+    update_sync_config,
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -94,6 +96,12 @@ router.add_api_route(
 )
 router.add_api_route("/{document_id}/pull-remote", pull_remote_changes, methods=["POST"])
 router.add_api_route("/products/{product_id}/sync-docs", sync_docs_to_repo, methods=["POST"])
+router.add_api_route(
+    "/repositories/{repository_id}/sync-config", get_sync_config, methods=["GET"]
+)
+router.add_api_route(
+    "/repositories/{repository_id}/sync-config", update_sync_config, methods=["PATCH"]
+)
 
 # Refresh routes
 router.add_api_route("/{document_id}/refresh", refresh_document, methods=["POST"])

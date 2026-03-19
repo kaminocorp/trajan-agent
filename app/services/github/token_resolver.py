@@ -41,16 +41,16 @@ class TokenResolver:
 
         # Priority 2: GitHub App installation for this repo's org
         if github_app_auth.is_configured and repository.product_id:
-            token = await self._try_app_token(repository)
-            if token:
+            app_token = await self._try_app_token(repository)
+            if app_token:
                 log_token_resolved(user_id, repository.full_name or "", "github_app")
-                return token, "github_app"
+                return app_token, "github_app"
 
         # Priority 3: User's account-wide PAT
-        token = await self._try_user_pat(user_id)
-        if token:
+        pat_token = await self._try_user_pat(user_id)
+        if pat_token:
             log_token_resolved(user_id, repository.full_name or "", "pat")
-            return token, "pat"
+            return pat_token, "pat"
 
         return None, "none"
 
@@ -60,9 +60,9 @@ class TokenResolver:
         Used for listing repos during import. App tokens are repo-scoped,
         so this prefers PAT for general listing.
         """
-        token = await self._try_user_pat(user_id)
-        if token:
-            return token, "pat"
+        pat_token = await self._try_user_pat(user_id)
+        if pat_token:
+            return pat_token, "pat"
 
         return None, "none"
 
@@ -88,9 +88,9 @@ class TokenResolver:
                         f"Failed to get App token for org {organization_id}, falling back to PAT"
                     )
 
-        token = await self._try_user_pat(user_id)
-        if token:
-            return token, "pat"
+        pat_token = await self._try_user_pat(user_id)
+        if pat_token:
+            return pat_token, "pat"
 
         return None, "none"
 

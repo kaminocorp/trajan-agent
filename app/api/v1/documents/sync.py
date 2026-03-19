@@ -7,17 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db_with_rls
 from app.api.v1.documents.crud import serialize_document
-from app.domain import document_ops, preferences_ops, product_ops, repository_ops
+from app.domain import document_ops, product_ops, repository_ops
 from app.models.user import User
 from app.schemas.docs import (
     DocsSyncStatusResponse,
     DocumentSyncStatusResponse,
     ImportDocsResponse,
+    SyncConfigResponse,
+    SyncConfigUpdate,
     SyncDocsRequest,
     SyncDocsResponse,
 )
 from app.services.docs.sync_service import DocsSyncService
 from app.services.github import GitHubService
+from app.services.github.token_resolver import TokenResolver
 
 
 async def import_docs_from_repo(
@@ -38,15 +41,6 @@ async def import_docs_from_repo(
             detail="Product not found",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get linked repositories (RLS enforces product access)
     repos = await repository_ops.get_github_repos_by_product(db, product_id=product_id)
     if not repos:
@@ -55,19 +49,33 @@ async def import_docs_from_repo(
             detail="No GitHub repositories linked to this product",
         )
 
-    github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
-
+    resolver = TokenResolver(db)
     total_imported = 0
     total_updated = 0
     total_skipped = 0
 
     for repo in repos:
-        if repo.full_name:
-            result = await sync_service.import_from_repo(repo)
-            total_imported += result.imported
-            total_updated += result.updated
-            total_skipped += result.skipped
+        if not repo.full_name:
+            continue
+        github_token, _ = await resolver.resolve_token(repo, current_user.id)
+        if not github_token:
+            continue
+        github_service = GitHubService(github_token)
+        sync_service = DocsSyncService(db, github_service)
+        result = await sync_service.import_from_repo(repo)
+        total_imported += result.imported
+        total_updated += result.updated
+        total_skipped += result.skipped
+
+    if total_imported == 0 and total_updated == 0 and total_skipped == 0 and repos:
+        # Check if the failure was due to missing tokens
+        any_token, _ = await resolver.resolve_token(repos[0], current_user.id)
+        if not any_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+                "or configure a personal access token in Settings.",
+            )
 
     return ImportDocsResponse(
         imported=total_imported,
@@ -94,11 +102,15 @@ async def get_docs_sync_status(
             detail="Product not found",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
+    # Resolve token via primary repo (status check covers all synced docs)
+    repos = await repository_ops.get_github_repos_by_product(db, product_id=product_id)
+    resolver = TokenResolver(db)
+    github_token: str | None = None
+    if repos:
+        github_token, _ = await resolver.resolve_token(repos[0], current_user.id)
+
     if not github_token:
-        # Return empty status if no token
+        # Return empty status if no token available
         return DocsSyncStatusResponse(
             documents=[],
             has_local_changes=False,
@@ -149,13 +161,18 @@ async def pull_remote_changes(
             detail="Document is not synced with GitHub",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
+    # Resolve token via the document's repository
+    github_token: str | None = None
+    if doc.repository_id:
+        repo = await repository_ops.get(db, id=doc.repository_id)
+        if repo:
+            resolver = TokenResolver(db)
+            github_token, _ = await resolver.resolve_token(repo, current_user.id)
     if not github_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured",
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
         )
 
     github_service = GitHubService(github_token)
@@ -182,22 +199,15 @@ async def sync_docs_to_repo(
     Push documentation to linked GitHub repository.
 
     Syncs specified documents (or all with local changes) to the
-    repository's docs/ folder. RLS enforces product access.
+    repository's configured branch. Uses TokenResolver to select
+    the best token (per-repo > GitHub App > PAT). RLS enforces
+    product access.
     """
     product = await product_ops.get(db, id=product_id)
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found",
-        )
-
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
         )
 
     # Get documents to sync
@@ -229,6 +239,39 @@ async def sync_docs_to_repo(
     # Use first repo (primary)
     repo = repos[0]
 
+    # Enforce sync_enabled flag
+    if not repo.sync_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sync is not enabled for this repository. "
+            "Enable it in Sync Settings before pushing.",
+        )
+
+    # Resolve token via TokenResolver (per-repo > GitHub App > PAT)
+    resolver = TokenResolver(db)
+    github_token, token_method = await resolver.resolve_token(repo, current_user.id)
+    if not github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
+        )
+
+    # Warn if token may lack write permission (App tokens with read-only contents)
+    if token_method == "github_app" and product.organization_id:
+        from app.domain import github_app_installation_ops
+
+        installation = await github_app_installation_ops.get_for_org(
+            db, product.organization_id
+        )
+        if installation and installation.permissions.get("contents") == "read":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The GitHub App installation has read-only 'contents' permission. "
+                "Sync requires 'contents: write'. Please update the App permissions "
+                "in your GitHub organization settings.",
+            )
+
     github_service = GitHubService(github_token)
     sync_service = DocsSyncService(db, github_service)
 
@@ -238,5 +281,75 @@ async def sync_docs_to_repo(
         success=result.success,
         files_synced=result.files_synced,
         commit_sha=result.commit_sha,
+        branch=result.branch,
+        pr_url=result.pr_url,
+        pr_number=result.pr_number,
         errors=result.errors,
+    )
+
+
+async def get_sync_config(
+    repository_id: uuid_pkg.UUID,
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_with_rls),
+) -> SyncConfigResponse:
+    """
+    Get sync configuration for a repository.
+
+    Returns the current sync settings (branch, path prefix, PR mode, doc filter).
+    RLS enforces product access via the repository's product.
+    """
+    repo = await repository_ops.get(db, id=repository_id)
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    return SyncConfigResponse(
+        sync_enabled=repo.sync_enabled,
+        sync_branch=repo.sync_branch,
+        sync_path_prefix=repo.sync_path_prefix,
+        sync_create_pr=repo.sync_create_pr,
+        sync_doc_filter=repo.sync_doc_filter,
+        last_sync_commit_sha=repo.last_sync_commit_sha,
+        last_sync_pr_url=repo.last_sync_pr_url,
+    )
+
+
+async def update_sync_config(
+    repository_id: uuid_pkg.UUID,
+    data: SyncConfigUpdate,
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_with_rls),
+) -> SyncConfigResponse:
+    """
+    Update sync configuration for a repository.
+
+    Allows setting target branch, path prefix, PR mode, and document filter.
+    Only provided fields are updated (partial update). RLS enforces product access.
+    """
+    repo = await repository_ops.get(db, id=repository_id)
+    if not repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found",
+        )
+
+    # Apply only provided fields
+    update_data = data.model_dump(exclude_unset=True)
+    for field_name, value in update_data.items():
+        setattr(repo, field_name, value)
+
+    await db.commit()
+    await db.refresh(repo)
+
+    return SyncConfigResponse(
+        sync_enabled=repo.sync_enabled,
+        sync_branch=repo.sync_branch,
+        sync_path_prefix=repo.sync_path_prefix,
+        sync_create_pr=repo.sync_create_pr,
+        sync_doc_filter=repo.sync_doc_filter,
+        last_sync_commit_sha=repo.last_sync_commit_sha,
+        last_sync_pr_url=repo.last_sync_pr_url,
     )

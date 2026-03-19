@@ -441,7 +441,7 @@ class OrgMemberOperations:
             .where(
                 OrganizationMember.organization_id == organization_id,
                 OrganizationMember.role.in_([MemberRole.OWNER.value, MemberRole.ADMIN.value]),
-                UserPreferences.github_token.is_not(None),
+                UserPreferences.github_token.is_not(None),  # type: ignore[union-attr]
             )
             .order_by(role_priority)
         )

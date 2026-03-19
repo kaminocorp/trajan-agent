@@ -138,17 +138,21 @@ class DocsSyncService:
         commit_message: str,
     ) -> SyncResult:
         """
-        Push documents to repository's docs/ folder.
+        Push documents to a GitHub repository, respecting sync configuration.
 
-        Creates/updates files and commits to default branch.
+        Uses the repository's sync config fields to determine:
+        - Which branch to commit to (sync_branch or default branch)
+        - What path prefix to use (sync_path_prefix, defaults to "docs/")
+        - Whether to create a branch if it doesn't exist
+        - Whether to open a PR after committing
 
         Args:
             documents: Documents to sync
-            repository: Target repository
+            repository: Target repository (with sync config)
             commit_message: Commit message
 
         Returns:
-            SyncResult with success status and commit SHA
+            SyncResult with success status, commit SHA, branch, and optional PR info
         """
         if not documents:
             return SyncResult(success=True, files_synced=0)
@@ -161,63 +165,93 @@ class DocsSyncService:
             )
 
         owner, repo_name = repository.full_name.split("/", 1)
-        branch = repository.default_branch or "main"
+        default_branch = repository.default_branch or "main"
+        target_branch = repository.sync_branch or default_branch
+        path_prefix = repository.sync_path_prefix or "docs/"
 
         try:
+            # If syncing to a non-default branch, ensure it exists
+            if target_branch != default_branch:
+                await self.github_service.create_branch(
+                    owner, repo_name, target_branch, from_branch=default_branch
+                )
+
+            # Build file list with sync path prefix
             files_to_commit = []
             for doc in documents:
                 if not doc.content:
                     continue
 
-                # Generate path if not already set
-                folder_path = doc.folder.get("path") if doc.folder else None
-                path = doc.github_path or generate_github_path(
-                    doc.title or "untitled", folder_path, doc.type or "blueprint"
-                )
-                files_to_commit.append(
-                    {
-                        "path": path,
-                        "content": doc.content,
-                    }
-                )
+                path = self._resolve_doc_path(doc, path_prefix)
+                files_to_commit.append({"path": path, "content": doc.content})
 
             if not files_to_commit:
-                return SyncResult(success=True, files_synced=0)
+                return SyncResult(success=True, files_synced=0, branch=target_branch)
 
             # Create commit via GitHub API
             commit_sha = await self.github_service.create_commit(
-                owner, repo_name, files_to_commit, commit_message, branch
+                owner, repo_name, files_to_commit, commit_message, target_branch
             )
 
-            # Update sync tracking for all documents.
+            # Optionally open a PR (only when syncing to a non-default branch)
+            pr_url: str | None = None
+            pr_number: int | None = None
+            if (
+                repository.sync_create_pr
+                and target_branch != default_branch
+            ):
+                pr_info = await self.github_service.create_pull_request(
+                    owner,
+                    repo_name,
+                    title=f"docs: sync {len(files_to_commit)} documents from Trajan",
+                    body=self._build_pr_body(files_to_commit),
+                    head=target_branch,
+                    base=default_branch,
+                )
+                pr_url = pr_info.html_url
+                pr_number = pr_info.number
+                repository.last_sync_pr_url = pr_url
+
+            # Update sync tracking on repository
+            repository.last_sync_commit_sha = commit_sha
+
+            # Update sync tracking on each document.
             # If per-file SHA fetch fails, mark the doc as needing re-sync
             # rather than crashing — the commit already landed on GitHub.
             for doc in documents:
-                folder_path = doc.folder.get("path") if doc.folder else None
-                path = doc.github_path or generate_github_path(
-                    doc.title or "untitled", folder_path, doc.type or "blueprint"
-                )
+                if not doc.content:
+                    continue
+                path = self._resolve_doc_path(doc, path_prefix)
                 try:
-                    new_sha = await self.github_service.get_file_sha(owner, repo_name, path, branch)
+                    new_sha = await self.github_service.get_file_sha(
+                        owner, repo_name, path, target_branch
+                    )
                     doc.github_sha = new_sha
                     doc.github_path = path
                     doc.last_synced_at = datetime.now(UTC)
                     doc.sync_status = "synced"
                 except Exception as e:
                     logger.warning(
-                        f"Failed to fetch SHA for {path} after commit — will re-sync next time: {e}"
+                        f"Failed to fetch SHA for {path} after commit "
+                        f"— will re-sync next time: {e}"
                     )
                     doc.github_path = path
-                    doc.sync_status = "pending"
+                    doc.sync_status = "local_changes"
 
             await self.db.commit()
 
-            logger.info(f"Synced {len(files_to_commit)} files to {repository.full_name}")
+            logger.info(
+                f"Synced {len(files_to_commit)} files to "
+                f"{repository.full_name}:{target_branch}"
+            )
 
             return SyncResult(
                 success=True,
                 files_synced=len(files_to_commit),
                 commit_sha=commit_sha,
+                branch=target_branch,
+                pr_url=pr_url,
+                pr_number=pr_number,
             )
 
         except GitHubAPIError as e:
@@ -283,7 +317,7 @@ class DocsSyncService:
                 continue
 
             owner, repo_name = repo.full_name.split("/", 1)
-            branch = repo.default_branch or "main"
+            branch = repo.sync_branch or repo.default_branch or "main"
 
             try:
                 tree = await self.github_service.get_repo_tree(owner, repo_name, branch)
@@ -384,7 +418,7 @@ class DocsSyncService:
             return None
 
         owner, repo_name = repo.full_name.split("/", 1)
-        branch = repo.default_branch or "main"
+        branch = repo.sync_branch or repo.default_branch or "main"
 
         try:
             file_content = await self.github_service.get_file_content(
@@ -407,6 +441,51 @@ class DocsSyncService:
         except GitHubAPIError as e:
             logger.error(f"Failed to pull remote changes: {e}")
             return None
+
+    def _resolve_doc_path(self, doc: Document, path_prefix: str) -> str:
+        """
+        Resolve the file path for a document in the target repository.
+
+        Uses the existing github_path if set (preserves round-trip paths),
+        otherwise generates a path using the sync path prefix and the
+        document's folder/title.
+
+        Args:
+            doc: The document to resolve the path for
+            path_prefix: Sync path prefix (e.g. "docs/", ".trajan/")
+
+        Returns:
+            File path relative to repository root
+        """
+        if doc.github_path:
+            return doc.github_path
+
+        # Build path: {prefix}{folder}/{slug}.md
+        # generate_github_path hardcodes "docs/" — replace with the configured prefix
+        default_path = generate_github_path(
+            doc.title or "untitled",
+            doc.folder.get("path") if doc.folder else None,
+            doc.type or "blueprint",
+        )
+        if path_prefix != "docs/":
+            # Strip the default "docs/" and prepend the configured prefix
+            prefix = path_prefix.rstrip("/") + "/"
+            if default_path.startswith("docs/"):
+                return prefix + default_path[len("docs/"):]
+            return prefix + default_path
+        return default_path
+
+    @staticmethod
+    def _build_pr_body(files: list[dict[str, str]]) -> str:
+        """Build a PR description listing the synced files."""
+        lines = ["## Synced from Trajan", ""]
+        lines.append(f"This PR syncs **{len(files)}** document(s):")
+        lines.append("")
+        for f in files:
+            lines.append(f"- `{f['path']}`")
+        lines.append("")
+        lines.append("*Auto-generated by Trajan doc sync.*")
+        return "\n".join(lines)
 
     def _is_doc_file(self, item: RepoTreeItem) -> bool:
         """Check if tree item is a documentation file we should import."""
