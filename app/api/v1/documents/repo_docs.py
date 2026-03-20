@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db_with_rls
-from app.domain import preferences_ops, product_ops, repository_ops
+from app.domain import product_ops, repository_ops
 from app.domain.organization_operations import organization_ops
 from app.domain.product_access_operations import product_access_ops
 from app.models.user import User
@@ -23,6 +23,7 @@ from app.schemas.repo_docs import (
 )
 from app.services.github import GitHubService
 from app.services.github.constants import is_documentation_file
+from app.services.github.token_resolver import TokenResolver
 
 
 def _build_doc_tree(
@@ -141,15 +142,6 @@ async def get_repo_docs_tree(
             detail="Product not found",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get linked repositories (RLS enforces product access)
     repos = await repository_ops.get_github_repos_by_product(db, product_id=product_id)
 
@@ -160,7 +152,8 @@ async def get_repo_docs_tree(
             fetched_at=datetime.now(UTC),
         )
 
-    github_service = GitHubService(github_token)
+    # Use TokenResolver to resolve the best token per-repo (per-repo > App > PAT)
+    resolver = TokenResolver(db)
 
     repo_trees: list[RepoDocsTree] = []
     total_files = 0
@@ -170,8 +163,14 @@ async def get_repo_docs_tree(
             continue
 
         try:
+            # Resolve token for this specific repo
+            token, _method = await resolver.resolve_token(repo, current_user.id)
+            if not token:
+                continue
+
             owner, repo_name = repo.full_name.split("/")
             branch = repo.default_branch or "main"
+            github_service = GitHubService(token)
 
             # Fetch repository tree
             tree = await github_service.get_repo_tree(owner, repo_name, branch)
@@ -233,16 +232,17 @@ async def get_repo_file_content(
             detail="Repository has no GitHub link",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
+    # Resolve token for this specific repo (per-repo > App > PAT)
+    resolver = TokenResolver(db)
+    token, _method = await resolver.resolve_token(repo, current_user.id)
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured",
+            detail="No GitHub access for this repository. Install the GitHub App, "
+            "add a Personal Access Token, or link the repo with a fine-grained token.",
         )
 
-    github_service = GitHubService(github_token)
+    github_service = GitHubService(token)
 
     try:
         owner, repo_name = repo.full_name.split("/")

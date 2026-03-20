@@ -24,7 +24,7 @@ router = APIRouter(
     tags=["api-keys"],
 )
 
-ALLOWED_SCOPES = {"tickets:write", "tickets:read"}
+ALLOWED_SCOPES = {"tickets:write", "tickets:read", "mcp:read", "mcp:write", "mcp:admin"}
 
 
 async def _require_api_access(db: AsyncSession, product_id: uuid_pkg.UUID) -> None:
