@@ -1,8 +1,9 @@
 import uuid as uuid_pkg
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, Index, String
+from sqlalchemy import Column, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, Relationship, SQLModel
 
 from app.models.base import TimestampMixin, UserOwnedMixin, UUIDMixin
@@ -110,8 +111,12 @@ class AppInfo(AppInfoBase, UUIDMixin, TimestampMixin, UserOwnedMixin, table=True
 
     product_id: uuid_pkg.UUID | None = Field(
         default=None,
-        foreign_key="products.id",
-        index=True,
+        sa_column=Column(
+            PG_UUID(as_uuid=True),
+            ForeignKey("products.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
     )
 
     # Relationships

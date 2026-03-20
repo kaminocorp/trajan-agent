@@ -2,8 +2,9 @@ import uuid as uuid_pkg
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, DateTime, Index, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, Relationship, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
@@ -100,8 +101,12 @@ class WorkItem(WorkItemBase, UUIDMixin, TimestampMixin, table=True):
 
     product_id: uuid_pkg.UUID | None = Field(
         default=None,
-        foreign_key="products.id",
-        index=True,
+        sa_column=Column(
+            PG_UUID(as_uuid=True),
+            ForeignKey("products.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
     )
 
     repository_id: uuid_pkg.UUID | None = Field(

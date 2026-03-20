@@ -14,6 +14,7 @@ from app.api.deps import (
     get_db_with_rls,
     require_product_subscription,
 )
+from app.api.v1.products.docs_generation import _has_github_access
 from app.core.database import async_session_maker
 from app.core.rls import set_rls_user_context
 from app.domain import product_ops
@@ -109,12 +110,13 @@ async def analyze_product(
                     f"Next analysis available in {hours_remaining} hours.",
                 )
 
-    # Get user's GitHub token from preferences (check existence only - token fetched in background task)
-    prefs = await preferences_ops.get_by_user_id(db, user_id=current_user.id)
-    if not prefs or not preferences_ops.get_decrypted_token(prefs):
+    # Check that at least one form of GitHub access exists (PAT, App, or per-repo token).
+    # The background task uses TokenResolver to resolve the best token per-repo.
+    if not await _has_github_access(db, product_id, current_user.id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token required for analysis. Configure it in Settings → General.",
+            detail="No GitHub access configured. Install the GitHub App, "
+            "add a Personal Access Token, or link repos with a fine-grained token.",
         )
 
     # Update status to analyzing using fresh session.
@@ -165,9 +167,9 @@ async def maybe_auto_trigger_analysis(
     if not prefs.auto_generate_docs:
         return False
 
-    # 2. Check GitHub token exists (required by analysis)
-    if not preferences_ops.get_decrypted_token(prefs):
-        logger.debug(f"Skipping auto-analysis for product {product_id}: no GitHub token configured")
+    # 2. Check any form of GitHub access exists (PAT, App installation, or per-repo token)
+    if not await _has_github_access(db, product_id, user_id):
+        logger.debug(f"Skipping auto-analysis for product {product_id}: no GitHub access configured")
         return False
 
     # 3. Check product exists and is not already analyzing

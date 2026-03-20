@@ -11,10 +11,10 @@ import logging
 import uuid as uuid_pkg
 
 from app.core.database import async_session_maker
-from app.domain.preferences_operations import preferences_ops
 from app.models.product import Product
 from app.schemas.product_overview import ProductOverview
 from app.services.analysis_orchestrator import AnalysisOrchestrator
+from app.services.docs.file_source import create_github_service_factory, get_fallback_github_service
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +53,17 @@ async def run_analysis_task(
                 logger.error(f"Product not found: {product_id}")
                 return
 
-            # Fetch GitHub token from user preferences (security: not passed as param)
+            # Create per-repo token resolution factory (per-repo token > App > PAT)
             user_uuid = uuid_pkg.UUID(user_id)
-            prefs = await preferences_ops.get_by_user_id(session, user_id=user_uuid)
-            github_token = preferences_ops.get_decrypted_token(prefs) if prefs else None
-            if not github_token:
-                logger.error(f"No GitHub token found for user {user_id}")
-                product.analysis_status = "failed"
-                product.analysis_error = "GitHub token not found. Configure it in Settings."
-                product.analysis_progress = None
-                session.add(product)
-                await session.commit()
-                return
+            factory = await create_github_service_factory(session, user_uuid)
 
-            # Run orchestrated analysis
-            orchestrator = AnalysisOrchestrator(session, github_token, product)
+            # Get fallback service for non-repo-specific API calls
+            fallback_service = await get_fallback_github_service(session, user_uuid)
+
+            # Run orchestrated analysis with per-repo token resolution
+            orchestrator = AnalysisOrchestrator(
+                session, product, github_service_factory=factory, github_service=fallback_service
+            )
             overview = await orchestrator.analyze_product()
 
             # Update product with results using fresh session to avoid statement timeout.
