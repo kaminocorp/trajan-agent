@@ -12,6 +12,7 @@ from app.api.v1 import (
     infra,
     integrations,
     internal,
+    mcp,
     organizations,
     preferences,
     products,
@@ -47,3 +48,4 @@ api_router.include_router(public_tickets.router)
 api_router.include_router(internal.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(integrations.router)
+api_router.include_router(mcp.router)

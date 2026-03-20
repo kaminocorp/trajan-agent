@@ -19,6 +19,7 @@ dependencies = [
     "stripe>=11.0.0",
     "apscheduler>=3.10.0",
     "cachetools>=5.0.0",
+    "mcp[server]>=1.0.0",
 ]
 
 [project.optional-dependencies]
