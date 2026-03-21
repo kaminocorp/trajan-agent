@@ -30,6 +30,7 @@ from app.schemas.product_overview import (
 )
 from app.services.architecture_extractor import ArchitectureExtractor
 from app.services.content_generator import ContentGenerator, ContentResult
+from app.services.docs.file_source import GitHubServiceFactory
 from app.services.file_selector import FileSelector, FileSelectorInput
 from app.services.framework_detector import FrameworkDetector
 from app.services.github import GitHubService, RepoContext
@@ -55,25 +56,52 @@ class AnalysisOrchestrator:
     def __init__(
         self,
         session: AsyncSession,
-        github_token: str,
         product: Product,
+        *,
+        github_service_factory: GitHubServiceFactory | None = None,
+        github_service: GitHubService | None = None,
     ) -> None:
         """
         Initialize the orchestrator.
 
         Args:
             session: Database session for querying repositories and updating progress
-            github_token: GitHub Personal Access Token for API access
             product: The product being analyzed (for progress updates)
+            github_service_factory: Per-repo factory that resolves the best token
+                (per-repo token > GitHub App > PAT) for each repository.
+            github_service: Fallback GitHubService for non-repo-specific calls.
+                Used when no factory is provided or as default for repos that
+                fail factory resolution.
         """
         self.session = session
         self.product = product
-        self.github = GitHubService(github_token)
+        self._github_service_factory = github_service_factory
+        self._github_fallback = github_service
         self.stats_extractor = StatsExtractor()
         self.arch_extractor = ArchitectureExtractor()
         self.content_generator = ContentGenerator()
         self.file_selector = FileSelector()
         self.framework_detector = FrameworkDetector()
+
+    async def _get_github_for_repo(self, repo: Repository) -> GitHubService:
+        """Resolve a GitHubService for a specific repository.
+
+        Uses the per-repo factory if available, falls back to the shared service.
+        """
+        if self._github_service_factory:
+            try:
+                return await self._github_service_factory(repo)
+            except ValueError:
+                logger.warning(
+                    f"Factory failed to resolve token for {repo.full_name}, "
+                    "trying fallback"
+                )
+        if self._github_fallback:
+            return self._github_fallback
+        raise ValueError(
+            f"No GitHub access for {repo.full_name}. "
+            "Install the GitHub App, add a PAT, or link the repo with a token."
+        )
 
     async def analyze_product(self) -> ProductOverview:
         """
@@ -230,8 +258,9 @@ class AnalysisOrchestrator:
             raise ValueError(f"Repository {repo.name} has no full_name")
 
         owner, repo_name = repo.full_name.split("/", 1)
+        github = await self._get_github_for_repo(repo)
 
-        return await self.github.get_repo_context(
+        return await github.get_repo_context(
             owner=owner,
             repo=repo_name,
             branch=repo.default_branch,
@@ -310,9 +339,10 @@ class AnalysisOrchestrator:
                         f"{context.full_name} (truncated: {result.truncated}){fallback_note}"
                     )
 
-                    # Fetch the selected files
+                    # Fetch the selected files using per-repo token
                     owner, repo_name = context.full_name.split("/", 1)
-                    selected_file_contents = await self.github.fetch_files_by_paths(
+                    github = await self._get_github_for_repo(repo)
+                    selected_file_contents = await github.fetch_files_by_paths(
                         owner=owner,
                         repo=repo_name,
                         paths=result.selected_files,
@@ -343,7 +373,7 @@ class AnalysisOrchestrator:
                         )
 
                         if additional_files:
-                            additional_contents = await self.github.fetch_files_by_paths(
+                            additional_contents = await github.fetch_files_by_paths(
                                 owner=owner,
                                 repo=repo_name,
                                 paths=additional_files,
