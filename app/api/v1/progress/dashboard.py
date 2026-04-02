@@ -112,7 +112,12 @@ async def get_dashboard_progress(
     If no cached summaries exist, returns is_generating=False and empty summaries.
     Use POST /dashboard/generate to trigger summary generation.
     """
-    from app.domain import dashboard_shipped_ops, org_member_ops, product_ops
+    from app.domain import (
+        dashboard_shipped_ops,
+        dashboard_stats_cache_ops,
+        org_member_ops,
+        product_ops,
+    )
 
     period = _normalize_period(days)
 
@@ -127,8 +132,44 @@ async def get_dashboard_progress(
         if not memberships:
             return _empty_dashboard_response()
 
-    # Get all products across user's orgs
-    all_products: list[tuple[Any, Any]] = []
+    # Resolve effective org ID for cache key
+    effective_org_id = organization_id or memberships[0].organization_id
+
+    # Check stats cache — serve immediately if fresh
+    stats_cache = await dashboard_stats_cache_ops.get_by_org_period(db, effective_org_id, period)
+    if stats_cache and dashboard_stats_cache_ops.is_fresh(stats_cache):
+        # Get all products for shipped summaries lookup
+        all_products: list[tuple[Any, Any]] = []
+        for membership in memberships:
+            products = await product_ops.get_by_organization(db, membership.organization_id)
+            for product in products:
+                all_products.append((product, membership.organization_id))
+
+        product_ids = [p.id for p, _ in all_products]
+        summaries = await dashboard_shipped_ops.get_by_products_period(db, product_ids, period)
+        summary_map = {str(s.product_id): s for s in summaries}
+
+        shipped_summaries: list[dict[str, Any]] = []
+        for product, _ in all_products:
+            cached = summary_map.get(str(product.id))
+            if cached:
+                shipped_summaries.append(_build_shipped_summary_dict(product, cached))
+
+        return {
+            "total_commits": stats_cache.total_commits,
+            "total_additions": stats_cache.total_additions,
+            "total_deletions": stats_cache.total_deletions,
+            "unique_contributors": stats_cache.unique_contributors,
+            "daily_activity": stats_cache.daily_activity,
+            "shipped_summaries": shipped_summaries,
+            "generated_at": (
+                max(s.generated_at for s in summaries).isoformat() if summaries else None
+            ),
+            "is_generating": False,
+        }
+
+    # Cache miss or stale — fetch live from GitHub
+    all_products = []
     for membership in memberships:
         products = await product_ops.get_by_organization(db, membership.organization_id)
         for product in products:
@@ -157,6 +198,19 @@ async def get_dashboard_progress(
     period_start = get_period_start(period)
     since_str = period_start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Collect all repo fetch tasks for concurrent execution
+    async def _fetch_repo_commits(
+        gh: GitHubReadOperations, repo: Any
+    ) -> list[dict[str, Any]]:
+        owner, name = repo.full_name.split("/")
+        commits, _ = await gh.get_commits_for_timeline(
+            owner, name, repo.default_branch, per_page=100
+        )
+        return commits
+
+    fetch_tasks: list[Any] = []
+    task_repo_names: list[str] = []
+
     for product, _ in all_products:
         repos = await repository_ops.get_github_repos_by_product(db, product.id)
         if not repos:
@@ -173,32 +227,34 @@ async def get_dashboard_progress(
         for repo in repos:
             if not repo.full_name:
                 continue
-            try:
-                owner, name = repo.full_name.split("/")
-                commits, _ = await product_github.get_commits_for_timeline(
-                    owner, name, repo.default_branch, per_page=100
-                )
+            fetch_tasks.append(_fetch_repo_commits(product_github, repo))
+            task_repo_names.append(repo.full_name)
 
-                for commit in commits:
-                    timestamp = commit["commit"]["committer"]["date"]
-                    if timestamp < since_str:
-                        continue
+    # Execute all repo fetches concurrently
+    results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-                    aggregate_stats["total_commits"] += 1
-                    aggregate_stats["unique_contributors"].add(commit["commit"]["author"]["name"])
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            logger.warning(f"Failed to fetch commits for {task_repo_names[i]}: {result}")
+            continue
 
-                    date = timestamp.split("T")[0]
-                    aggregate_stats["daily_activity"][date] += 1
+        for commit in result:
+            timestamp = commit["commit"]["committer"]["date"]
+            if timestamp < since_str:
+                continue
 
-            except Exception as e:
-                logger.warning(f"Failed to fetch commits for {repo.full_name}: {e}")
+            aggregate_stats["total_commits"] += 1
+            aggregate_stats["unique_contributors"].add(commit["commit"]["author"]["name"])
+
+            date = timestamp.split("T")[0]
+            aggregate_stats["daily_activity"][date] += 1
 
     # Get cached shipped summaries (includes enriched data)
     summaries = await dashboard_shipped_ops.get_by_products_period(db, product_ids, period)
     summary_map = {str(s.product_id): s for s in summaries}
 
     # Build response — include cached enrichment data
-    shipped_summaries: list[dict[str, Any]] = []
+    shipped_summaries = []
     for product, _ in all_products:
         cached = summary_map.get(str(product.id))
         if cached:
@@ -206,6 +262,19 @@ async def get_dashboard_progress(
 
     # Generate daily activity for sparkline
     daily_activity = generate_daily_activity(dict(aggregate_stats["daily_activity"]), period)
+
+    # Cache aggregate stats for next request
+    await dashboard_stats_cache_ops.upsert(
+        db=db,
+        organization_id=effective_org_id,
+        period=period,
+        total_commits=aggregate_stats["total_commits"],
+        total_additions=aggregate_stats["total_additions"],
+        total_deletions=aggregate_stats["total_deletions"],
+        unique_contributors=len(aggregate_stats["unique_contributors"]),
+        daily_activity=daily_activity,
+    )
+    await db.commit()
 
     return {
         "total_commits": aggregate_stats["total_commits"],
@@ -232,7 +301,12 @@ async def generate_dashboard_progress(
     per-product contributor stats, and uses AI to generate "What Shipped"
     summaries. Results are cached for subsequent GET requests.
     """
-    from app.domain import dashboard_shipped_ops, org_member_ops, product_ops
+    from app.domain import (
+        dashboard_shipped_ops,
+        dashboard_stats_cache_ops,
+        org_member_ops,
+        product_ops,
+    )
     from app.services.progress.shipped_summarizer import (
         CommitInfo,
         ShippedAnalysisInput,
@@ -410,6 +484,20 @@ async def generate_dashboard_progress(
     await db.commit()
 
     daily_activity = generate_daily_activity(dict(aggregate_stats["daily_activity"]), period)
+
+    # Cache aggregate stats alongside shipped summaries
+    effective_org_id = organization_id or memberships[0].organization_id
+    await dashboard_stats_cache_ops.upsert(
+        db=db,
+        organization_id=effective_org_id,
+        period=period,
+        total_commits=aggregate_stats["total_commits"],
+        total_additions=aggregate_stats["total_additions"],
+        total_deletions=aggregate_stats["total_deletions"],
+        unique_contributors=len(aggregate_stats["unique_contributors"]),
+        daily_activity=daily_activity,
+    )
+    await db.commit()
 
     return {
         "total_commits": aggregate_stats["total_commits"],

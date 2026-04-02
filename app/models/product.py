@@ -12,6 +12,7 @@ from app.models.base import TimestampMixin, UserOwnedMixin, UUIDMixin
 
 if TYPE_CHECKING:
     from app.models.app_info import AppInfo
+    from app.models.changelog import ChangelogEntry
     from app.models.document import Document
     from app.models.document_section import DocumentSection
     from app.models.infra_component import InfraComponent
@@ -180,6 +181,10 @@ class Product(ProductBase, UUIDMixin, TimestampMixin, UserOwnedMixin, table=True
         },
     )
     infra_components: list["InfraComponent"] = Relationship(
+        back_populates="product",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    changelog_entries: list["ChangelogEntry"] = Relationship(
         back_populates="product",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )

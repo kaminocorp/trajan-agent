@@ -22,6 +22,7 @@ class PreferencesRead(BaseModel):
     github_token_set: bool  # Don't expose actual token
     default_view: str
     sidebar_default: str
+    dashboard_mode: str
     auto_generate_docs: bool
     github_setup_dismissed: bool
     github_connect_modal_dismissed: bool
@@ -40,6 +41,7 @@ class PreferencesUpdate(BaseModel):
     github_token: str | None = None
     default_view: str | None = None
     sidebar_default: str | None = None
+    dashboard_mode: str | None = None
     auto_generate_docs: bool | None = None
     github_setup_dismissed: bool | None = None
     github_connect_modal_dismissed: bool | None = None
@@ -73,6 +75,7 @@ def prefs_to_response(prefs: UserPreferences) -> dict:
         "github_token_set": prefs.github_token is not None and len(prefs.github_token) > 0,
         "default_view": prefs.default_view,
         "sidebar_default": prefs.sidebar_default,
+        "dashboard_mode": prefs.dashboard_mode,
         "auto_generate_docs": prefs.auto_generate_docs,
         "github_setup_dismissed": prefs.github_setup_dismissed,
         "github_connect_modal_dismissed": prefs.github_connect_modal_dismissed,
@@ -115,6 +118,12 @@ async def update_preferences(
         "collapsed",
     ):
         update_data["sidebar_default"] = "expanded"
+
+    if "dashboard_mode" in update_data and update_data["dashboard_mode"] not in (
+        "classic",
+        "wiki",
+    ):
+        update_data["dashboard_mode"] = "classic"
 
     # Handle empty token as removal
     if "github_token" in update_data and update_data["github_token"] == "":
