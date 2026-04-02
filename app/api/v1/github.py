@@ -20,7 +20,7 @@ from app.api.v1.products.analysis import maybe_auto_trigger_analysis
 from app.api.v1.products.docs_generation import maybe_auto_trigger_docs
 from app.core.database import get_db
 from app.core.encryption import token_encryption
-from app.domain import product_ops, repository_ops
+from app.domain import org_member_ops, product_ops, repository_ops
 from app.domain.subscription_operations import subscription_ops
 from app.models.user import User
 from app.services.github import GitHubAPIError, GitHubService
@@ -233,6 +233,16 @@ async def list_github_repos(
     """
     token_method = "pat"
     if organization_id:
+        # Verify caller is a member of the target organization
+        member = await org_member_ops.get_by_org_and_user(
+            db, organization_id, current_user.id
+        )
+        if not member:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a member of this organization",
+            )
+
         resolver = TokenResolver(db)
         token, token_method = await resolver.resolve_token_for_org(
             organization_id, current_user.id
@@ -516,7 +526,7 @@ async def refresh_repository_metadata(
 
     Updates stars, forks, description, and default branch.
     Only works for repositories with a github_id (imported from GitHub).
-    Requires viewer access to the product (RLS enforced).
+    Requires editor access to the product.
     """
     repo = await repository_ops.get(db, id=repository_id)
     if not repo:
@@ -525,8 +535,13 @@ async def refresh_repository_metadata(
             detail="Repository not found",
         )
 
-    if repo.product_id:
-        await require_product_subscription(db, repo.product_id)
+    if not repo.product_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Repository has no associated product",
+        )
+    await check_product_editor_access(db, repo.product_id, current_user.id)
+    await require_product_subscription(db, repo.product_id)
 
     if not repo.github_id:
         raise HTTPException(

@@ -6,6 +6,7 @@ from app.api.v1 import (
     announcements,
     api_keys,
     app_info,
+    changelog,
     documents,
     feedback,
     github,
@@ -28,6 +29,7 @@ from app.api.v1 import (
 api_router = APIRouter(prefix="/api/v1")
 
 api_router.include_router(products.router)
+api_router.include_router(changelog.router)
 api_router.include_router(repositories.router)
 api_router.include_router(work_items.router)
 api_router.include_router(documents.router)
