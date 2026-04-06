@@ -40,6 +40,7 @@ class UserPreferences(SQLModel, table=True):
     # UI Defaults
     default_view: str = Field(default="grid", max_length=20)  # 'grid', 'list'
     sidebar_default: str = Field(default="expanded", max_length=20)  # 'expanded', 'collapsed'
+    dashboard_mode: str = Field(default="classic", max_length=20)  # 'classic', 'wiki'
 
     # Automation
     auto_generate_docs: bool = Field(default=True)

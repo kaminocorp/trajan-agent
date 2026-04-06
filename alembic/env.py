@@ -15,6 +15,8 @@ from app.config import settings
 from app.models import (  # noqa: F401
     AppInfo,
     BillingEvent,
+    ChangelogCommit,
+    ChangelogEntry,
     CommitStatsCache,
     CustomDocJob,
     DashboardShippedSummary,
