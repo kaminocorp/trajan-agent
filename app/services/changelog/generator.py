@@ -335,6 +335,7 @@ class ChangelogGenerator:
         for event in batch:
             repo_label = event.repository_name or event.repository_full_name
             commit_lines.append(
+                f"- [{event.commit_sha}] ({event.timestamp[:10]}) "
                 f"- [{event.commit_sha[:7]}] ({event.timestamp[:10]}) "
                 f"[{repo_label}] {event.commit_author}: {event.commit_message}"
             )
