@@ -72,6 +72,18 @@ class PreferencesOperations:
             return None
         return token_encryption.decrypt(prefs.github_token)
 
+    async def clear_github_token(
+        self,
+        db: AsyncSession,
+        user_id: uuid_pkg.UUID,
+    ) -> None:
+        """Clear a user's stored GitHub token (e.g. after confirmed 401)."""
+        prefs = await self.get_by_user_id(db, user_id)
+        if prefs and prefs.github_token:
+            prefs.github_token = None
+            db.add(prefs)
+            await db.flush()
+
     async def validate_github_token(self, token: str) -> dict:
         """
         Validate a GitHub Personal Access Token.

@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db_with_rls
 from app.domain import repository_ops
-from app.domain.preferences_operations import preferences_ops
 from app.models import User
 from app.services.github import GitHubReadOperations
 
@@ -181,11 +180,6 @@ async def get_dashboard_progress(
     # Get product IDs for cache lookup
     product_ids = [p.id for p, _ in all_products]
 
-    # Resolve GitHub token (current user first for fast path)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    user_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    user_github = GitHubReadOperations(user_token) if user_token else None
-
     # Aggregate stats across all products
     aggregate_stats: dict[str, Any] = {
         "total_commits": 0,
@@ -199,9 +193,7 @@ async def get_dashboard_progress(
     since_str = period_start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Collect all repo fetch tasks for concurrent execution
-    async def _fetch_repo_commits(
-        gh: GitHubReadOperations, repo: Any
-    ) -> list[dict[str, Any]]:
+    async def _fetch_repo_commits(gh: GitHubReadOperations, repo: Any) -> list[dict[str, Any]]:
         owner, name = repo.full_name.split("/")
         commits, _ = await gh.get_commits_for_timeline(
             owner, name, repo.default_branch, per_page=100
@@ -216,13 +208,11 @@ async def get_dashboard_progress(
         if not repos:
             continue
 
-        # Per-product token fallback when current user has no token
-        product_github = user_github
-        if not product_github:
-            fallback_token = await resolve_github_token(db, current_user, product.id)
-            if not fallback_token:
-                continue
-            product_github = GitHubReadOperations(fallback_token)
+        # Resolve a validated token per product (validates PAT, falls through to App token)
+        product_token = await resolve_github_token(db, current_user, product.id)
+        if not product_token:
+            continue
+        product_github = GitHubReadOperations(product_token)
 
         for repo in repos:
             if not repo.full_name:
@@ -335,11 +325,6 @@ async def generate_dashboard_progress(
     if not all_products:
         raise HTTPException(status_code=400, detail="No products found")
 
-    # Resolve GitHub token (current user first for fast path)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    user_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    github = GitHubReadOperations(user_token) if user_token else None
-
     period_start = get_period_start(period)
     since_str = period_start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -358,13 +343,11 @@ async def generate_dashboard_progress(
         if not repos:
             continue
 
-        # Per-product token fallback when current user has no token
-        product_github = github
-        if not product_github:
-            fallback_token = await resolve_github_token(db, current_user, product.id)
-            if not fallback_token:
-                continue
-            product_github = GitHubReadOperations(fallback_token)
+        # Resolve a validated token per product (validates PAT, falls through to App token)
+        product_token = await resolve_github_token(db, current_user, product.id)
+        if not product_token:
+            continue
+        product_github = GitHubReadOperations(product_token)
 
         # Fetch commits + merged PRs concurrently for all repos
         product_commits: list[CommitInfo] = []
