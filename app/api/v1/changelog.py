@@ -2,6 +2,7 @@
 
 import logging
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -185,6 +186,21 @@ async def generate_changelog(
             detail="No GitHub access configured. Install the GitHub App, "
             "add a Personal Access Token, or link repos with a fine-grained token.",
         )
+
+    # Write initial "starting" progress before queuing the background task so the
+    # frontend status poll never sees "idle" in the gap between this response and
+    # the background task's first _emit_progress("fetching") write.
+    product.docs_generation_progress = {
+        "type": "changelog",
+        "stage": "starting",
+        "message": "Changelog generation queued...",
+        "batch_current": 0,
+        "batch_total": 0,
+        "entries_created": 0,
+        "commits_processed": 0,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    await db.commit()
 
     # Start background task
     background_tasks.add_task(
