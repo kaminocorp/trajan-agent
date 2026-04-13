@@ -128,6 +128,9 @@ async def generate_custom_document(
     sub_ctx = await require_product_subscription(db, product_id)
     product = sub_ctx.product
 
+    # Require editor access — viewers cannot trigger custom doc generation
+    await check_product_editor_access(db, product_id, current_user.id)
+
     # Check rate limit using the product's org tier (not user's default org)
     await check_custom_doc_rate_limit(sub_ctx, current_user, db)
 

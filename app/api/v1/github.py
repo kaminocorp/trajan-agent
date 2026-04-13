@@ -22,11 +22,13 @@ from app.core.database import get_db
 from app.core.encryption import token_encryption
 from app.domain import org_member_ops, product_ops, repository_ops
 from app.domain.subscription_operations import subscription_ops
+from app.models.billing import BillingEventType
 from app.models.user import User
 from app.services.github import GitHubAPIError, GitHubService
 from app.services.github.exceptions import GitHubRepoRenamed
 from app.services.github.token_resolver import TokenResolver
 from app.services.github.types import GitHubRepo
+from app.services.stripe_service import stripe_service
 
 router = APIRouter(prefix="/github", tags=["github"])
 logger = logging.getLogger(__name__)
@@ -234,9 +236,7 @@ async def list_github_repos(
     token_method = "pat"
     if organization_id:
         # Verify caller is a member of the target organization
-        member = await org_member_ops.get_by_org_and_user(
-            db, organization_id, current_user.id
-        )
+        member = await org_member_ops.get_by_org_and_user(db, organization_id, current_user.id)
         if not member:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -244,9 +244,7 @@ async def list_github_repos(
             )
 
         resolver = TokenResolver(db)
-        token, token_method = await resolver.resolve_token_for_org(
-            organization_id, current_user.id
-        )
+        token, token_method = await resolver.resolve_token_for_org(organization_id, current_user.id)
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -475,6 +473,25 @@ async def import_github_repos(
     # after long GitHub API calls holding the transaction open).
     if imported:
         await db.commit()
+
+    # Report overage usage to Stripe after all repos imported
+    if imported and sub_ctx.plan.allows_overages:
+        final_count = current_count + len(imported)
+        if final_count > sub_ctx.plan.base_repo_limit:
+            stripe_service.report_repo_usage(sub_ctx.subscription, final_count)
+            overage_count = final_count - sub_ctx.plan.base_repo_limit
+            await subscription_ops.log_event(
+                db,
+                organization_id=sub_ctx.organization.id,
+                event_type=BillingEventType.OVERAGE_BILLED,
+                new_value={
+                    "repo_count": final_count,
+                    "base_limit": sub_ctx.plan.base_repo_limit,
+                    "overage_count": overage_count,
+                    "imported_count": len(imported),
+                },
+                description=f"Bulk import: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+            )
 
     # Auto-trigger docs generation if repos were actually imported
     docs_triggered = False
@@ -866,6 +883,24 @@ async def link_github_repo(
     )
 
     await db.commit()
+
+    # Report overage usage to Stripe (metered billing)
+    if sub_ctx.plan.allows_overages:
+        new_count = current_count + 1
+        if new_count > sub_ctx.plan.base_repo_limit:
+            stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
+            overage_count = new_count - sub_ctx.plan.base_repo_limit
+            await subscription_ops.log_event(
+                db,
+                organization_id=sub_ctx.organization.id,
+                event_type=BillingEventType.OVERAGE_BILLED,
+                new_value={
+                    "repo_count": new_count,
+                    "base_limit": sub_ctx.plan.base_repo_limit,
+                    "overage_count": overage_count,
+                },
+                description=f"Link-repo: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+            )
 
     # Auto-trigger docs + analysis
     docs_triggered = False
