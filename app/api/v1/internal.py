@@ -5,6 +5,7 @@ Scheduled jobs run automatically via APScheduler (see services/scheduler.py).
 Endpoints bypass Supabase JWT auth and instead validate a shared secret via X-Cron-Secret.
 """
 
+import hmac
 import logging
 from dataclasses import asdict
 from typing import Any
@@ -27,7 +28,7 @@ def _verify_cron_secret(x_cron_secret: str = Header(...)) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Cron secret not configured",
         )
-    if x_cron_secret != settings.cron_secret:
+    if not hmac.compare_digest(x_cron_secret, settings.cron_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid cron secret",
