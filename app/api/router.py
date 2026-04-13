@@ -14,7 +14,10 @@ from app.api.v1 import (
     integrations,
     internal,
     mcp,
+    org_api_keys,
     organizations,
+    partner,
+    partner_config,
     preferences,
     products,
     progress,
@@ -51,3 +54,6 @@ api_router.include_router(internal.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(integrations.router)
 api_router.include_router(mcp.router)
+api_router.include_router(org_api_keys.router)
+api_router.include_router(partner.router)
+api_router.include_router(partner_config.router)

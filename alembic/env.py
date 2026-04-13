@@ -31,6 +31,7 @@ from app.models import (  # noqa: F401
     InfraComponent,
     Organization,
     OrganizationMember,
+    OrgApiKey,
     OrgDigestPreference,
     Product,
     ProductAccess,

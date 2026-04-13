@@ -11,6 +11,7 @@ from app.domain.github_app_installation_operations import (
     github_app_installation_repo_ops,
 )
 from app.domain.infra_component_operations import infra_component_ops
+from app.domain.org_api_key_operations import org_api_key_ops
 from app.domain.org_digest_preference_operations import org_digest_preference_ops
 from app.domain.org_member_operations import org_member_ops
 from app.domain.organization_operations import organization_ops
@@ -28,6 +29,7 @@ from app.domain.work_item_operations import work_item_ops
 
 __all__ = [
     "changelog_ops",
+    "org_api_key_ops",
     "org_digest_preference_ops",
     "announcement_ops",
     "commit_stats_cache_ops",

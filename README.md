@@ -1,35 +1,34 @@
-<p align="center">
-  <img src="https://www.trajancloud.com/trajan-icon.svg" alt="Trajan" width="80" height="80" />
-</p>
-
-<h3 align="center">Trajan Agent</h3>
+<h1 align="center">Trajan Agent</h1>
 
 <p align="center">
-  Open-source backend for <a href="https://www.trajancloud.com">Trajan</a> — a lightweight developer workspace<br/>
-  for managing software products, documentation, and development progress.
+  Connect your GitHub repos. Get AI-generated docs, commit-based progress tracking, and an agent that understands your codebase — no tickets, no manual updates.
 </p>
 
 <p align="center">
   <a href="https://www.trajancloud.com">Website</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://www.trajancloud.com/docs">API Docs</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/kaminocorp/trajan-agent/issues">Issues</a>
 </p>
 
+<p align="center">
+  <strong>Python 3.11+ &nbsp;·&nbsp; FastAPI &nbsp;·&nbsp; SQLModel &nbsp;·&nbsp; PostgreSQL &nbsp;·&nbsp; Claude AI</strong>
+</p>
+
 ---
 
-## What is Trajan?
+## What Trajan does
 
-Trajan is a calm, structured workspace where developers manage their software products. Connect your GitHub repositories and Trajan handles the rest — auto-generated documentation, progress tracking from commits, AI-powered summaries, and a PM agent that knows your codebase.
+You give Trajan your GitHub repositories. It reads your code and gives you:
 
-This repository is the **community edition** of the Trajan backend. All features are unlocked — no repo limits, no paywalls.
+| Capability | What happens |
+|---|---|
+| **AI documentation** | Generates changelogs, architecture blueprints, and implementation plans by analyzing your source code. Regenerates only when code changes. |
+| **Progress tracking** | Turns commits into activity dashboards, contributor summaries, and velocity metrics. No tickets or manual status updates. |
+| **PM agent** | A chat interface with full context on your repos, commits, PRs, and issues. Answers questions about your codebase. |
+| **Two-way GitHub sync** | Pushes generated documents to GitHub branches and opens PRs automatically. |
+| **Feedback ingestion** | Public API endpoint for collecting user feedback. AI interprets, deduplicates, and categorises submissions. |
+| **Team workspaces** | Organizations with role-based access (owner / admin / member / viewer) and per-product permission overrides. |
+| **Environment vault** | Encrypted storage for env vars, service URLs, and infrastructure notes — Fernet encryption at rest. |
 
-### Capabilities
-
-- **Auto-generated documentation** — Changelogs, architecture blueprints, and implementation plans written by AI agents that read your code
-- **Progress without tickets** — Commit-based activity tracking, contributor summaries, and velocity metrics with no manual updates
-- **PM agent** — Chat with an AI that has full context on your repositories, commits, PRs, and issues
-- **Feedback tickets** — Public API for collecting user feedback with AI-powered interpretation and deduplication
-- **Two-way GitHub sync** — Push documents to GitHub branches and open PRs automatically
-- **Team collaboration** — Organizations with role-based access (owner / admin / member / viewer) and per-product overrides
-- **Environment vault** — Fernet-encrypted storage for env vars, service URLs, and infrastructure notes
+This is the **open-source community edition** — all features unlocked, no repo limits, no paywalls.
 
 ---
 
@@ -112,7 +111,7 @@ app/
 └── schemas/         # Pydantic response schemas
 ```
 
-**Stack:** Python 3.11 · FastAPI · SQLModel · PostgreSQL (Supabase) · Anthropic Claude · asyncpg
+**Stack:** Python 3.11+ · FastAPI · SQLModel · PostgreSQL (Supabase) · Claude AI · asyncpg
 
 ### Request lifecycle
 
@@ -203,7 +202,7 @@ class BaseOperations(Generic[ModelType]):
     async def delete(self, db, id, user_id) -> bool: ...
 ```
 
-Each model extends this with domain-specific methods. 22 operation classes follow this pattern. Route handlers never contain SQL or business logic.
+Each model extends this with domain-specific methods. Route handlers never contain SQL or business logic — all domain logic lives in operation classes.
 
 ```python
 # Module-level singleton — imported and used directly
@@ -284,7 +283,7 @@ TRAJAN_TESTS_ENABLED=1 pytest tests/integration/         # Integration (needs Su
 
 ## Community edition vs hosted
 
-This is the community edition — all features unlocked. The [hosted version](https://www.trajancloud.com) adds managed infrastructure and billing.
+This is the community edition — all features unlocked, self-hosted. The [hosted version](https://www.trajancloud.com) adds managed infrastructure, automatic updates, and tiered plans.
 
 | | Community | Hosted |
 |---|---|---|
@@ -297,7 +296,7 @@ This is the community edition — all features unlocked. The [hosted version](ht
 
 ## Contributing
 
-Contributions are welcome. Please open an issue first to discuss what you'd like to change.
+Contributions are welcome — please [open an issue](https://github.com/kaminocorp/trajan-agent/issues) first to discuss what you'd like to change.
 
 ---
 

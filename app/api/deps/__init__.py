@@ -26,6 +26,10 @@ from .organization import (
     require_org_owner,
     require_system_admin,
 )
+from .org_api_key_auth import (
+    get_org_api_key,
+    require_partner_scope,
+)
 from .product_access import (
     ProductAccessContext,
     check_product_admin_access,
@@ -61,6 +65,9 @@ __all__ = [
     "require_active_subscription",
     "require_agent_enabled",
     "require_product_subscription",
+    # Partner API auth
+    "get_org_api_key",
+    "require_partner_scope",
     # Product access
     "ProductAccessContext",
     "get_product_access",
