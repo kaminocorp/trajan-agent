@@ -262,7 +262,7 @@ class OrganizationOperations:
         cache_key = request_cache_key("member_role", organization_id, user_id)
         cached = get_request_cache_value(cache_key)
         if cached is not None:
-            return cached  # type: ignore[return-value]
+            return cached
 
         statement = select(OrganizationMember.role).where(
             OrganizationMember.organization_id == organization_id,
