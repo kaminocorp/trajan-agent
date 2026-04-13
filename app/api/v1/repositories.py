@@ -26,8 +26,10 @@ from app.api.v1.products.docs_generation import maybe_auto_trigger_docs
 from app.config.plans import get_plan
 from app.domain import repository_ops
 from app.domain.subscription_operations import subscription_ops
+from app.models.billing import BillingEventType
 from app.models.repository import RepositoryCreate, RepositoryUpdate
 from app.models.user import User
+from app.services.stripe_service import stripe_service
 
 logger = logging.getLogger(__name__)
 
@@ -163,9 +165,6 @@ async def create_repository(
             f"Upgrade your plan to add more repositories.",
         )
 
-    # Warn about overage for paid plans (but still allow)
-    # This is informational - actual billing happens via Stripe metered usage
-
     obj_data = data.model_dump()
     if obj_data.get("full_name") is None:
         obj_data["full_name"] = obj_data["name"]
@@ -174,6 +173,24 @@ async def create_repository(
         obj_in=obj_data,
         imported_by_user_id=current_user.id,
     )
+
+    # Report overage usage to Stripe (metered billing)
+    if sub_ctx.plan.allows_overages:
+        new_count = current_count + 1
+        if new_count > sub_ctx.plan.base_repo_limit:
+            stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
+            overage_count = new_count - sub_ctx.plan.base_repo_limit
+            await subscription_ops.log_event(
+                db,
+                organization_id=sub_ctx.organization.id,
+                event_type=BillingEventType.OVERAGE_BILLED,
+                new_value={
+                    "repo_count": new_count,
+                    "base_limit": sub_ctx.plan.base_repo_limit,
+                    "overage_count": overage_count,
+                },
+                description=f"Repo created: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+            )
 
     # Auto-trigger docs generation if user preference is enabled
     docs_triggered = False
@@ -267,6 +284,24 @@ async def delete_repository(
 
     # Check product access (editor required for deletion)
     await check_product_editor_access(db, repo.product_id, current_user.id)
-    await require_product_subscription(db, repo.product_id)
+    sub_ctx = await require_product_subscription(db, repo.product_id)
 
     await repository_ops.delete(db, id=repository_id)
+
+    # Report updated overage usage to Stripe after deletion
+    if sub_ctx.plan.allows_overages:
+        new_count = await repository_ops.count_by_org(db, sub_ctx.organization.id)
+        if new_count >= sub_ctx.plan.base_repo_limit:
+            stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
+            overage_count = new_count - sub_ctx.plan.base_repo_limit
+            await subscription_ops.log_event(
+                db,
+                organization_id=sub_ctx.organization.id,
+                event_type=BillingEventType.OVERAGE_BILLED,
+                new_value={
+                    "repo_count": new_count,
+                    "base_limit": sub_ctx.plan.base_repo_limit,
+                    "overage_count": overage_count,
+                },
+                description=f"Repo deleted: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+            )

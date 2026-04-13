@@ -68,7 +68,7 @@ class ProductAccessOperations:
         cache_key = request_cache_key("access", product_id, user_id)
         cached = get_request_cache_value(cache_key)
         if cached is not None:
-            return cached  # type: ignore[return-value]
+            return cached
 
         # Owners and admins always have admin access to all products
         if org_role in (MemberRole.OWNER.value, MemberRole.ADMIN.value):

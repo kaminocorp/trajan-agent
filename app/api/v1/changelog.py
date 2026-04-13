@@ -2,6 +2,7 @@
 
 import logging
 import uuid as uuid_pkg
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,17 +53,17 @@ def _serialize_entry(entry: object) -> ChangelogEntryRead:
         )
 
     return ChangelogEntryRead(
-        id=str(entry.id),  # type: ignore[union-attr]
-        product_id=str(entry.product_id),  # type: ignore[union-attr]
-        title=entry.title,  # type: ignore[union-attr]
-        summary=entry.summary,  # type: ignore[union-attr]
-        category=entry.category,  # type: ignore[union-attr]
-        version=entry.version,  # type: ignore[union-attr]
-        entry_date=entry.entry_date,  # type: ignore[union-attr]
-        is_ai_generated=entry.is_ai_generated,  # type: ignore[union-attr]
-        is_published=entry.is_published,  # type: ignore[union-attr]
-        created_at=entry.created_at,  # type: ignore[union-attr]
-        updated_at=entry.updated_at,  # type: ignore[union-attr]
+        id=str(entry.id),
+        product_id=str(entry.product_id),
+        title=entry.title,
+        summary=entry.summary,
+        category=entry.category,
+        version=entry.version,
+        entry_date=entry.entry_date,
+        is_ai_generated=entry.is_ai_generated,
+        is_published=entry.is_published,
+        created_at=entry.created_at,
+        updated_at=entry.updated_at,
         commits=commits,
     )
 
@@ -186,6 +187,21 @@ async def generate_changelog(
             "add a Personal Access Token, or link repos with a fine-grained token.",
         )
 
+    # Write initial "starting" progress before queuing the background task so the
+    # frontend status poll never sees "idle" in the gap between this response and
+    # the background task's first _emit_progress("fetching") write.
+    product.docs_generation_progress = {
+        "type": "changelog",
+        "stage": "starting",
+        "message": "Changelog generation queued...",
+        "batch_current": 0,
+        "batch_total": 0,
+        "entries_created": 0,
+        "commits_processed": 0,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    await db.commit()
+
     # Start background task
     background_tasks.add_task(
         _run_changelog_generation,
@@ -278,8 +294,10 @@ async def create_changelog_entry(
     await db.commit()
 
     # Re-fetch with commits loaded
-    entry = await changelog_ops.get(db, entry.id)
-    return _serialize_entry(entry)
+    refreshed = await changelog_ops.get(db, entry.id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="Changelog entry not found after creation")
+    return _serialize_entry(refreshed)
 
 
 @router.patch(
@@ -321,8 +339,10 @@ async def update_changelog_entry(
     await db.commit()
 
     # Re-fetch with commits loaded
-    entry = await changelog_ops.get(db, entry.id)
-    return _serialize_entry(entry)
+    refreshed = await changelog_ops.get(db, entry.id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="Changelog entry not found after update")
+    return _serialize_entry(refreshed)
 
 
 @router.delete(

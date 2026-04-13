@@ -7,12 +7,14 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_cache import get_request_cache_value, set_request_cache_value
 from app.domain import repository_ops
 from app.domain.preferences_operations import preferences_ops
 from app.models import User
 from app.models.repository import Repository
 from app.services.github import GitHubReadOperations
 from app.services.github.exceptions import GitHubRepoRenamed
+from app.services.github.http_client import get_github_client
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,40 @@ def get_period_days(period: str) -> int:
     return period_days.get(period, 7)
 
 
+async def _is_token_valid(token: str) -> bool:
+    """Quick check if a GitHub PAT is still valid.
+
+    Calls GET /user (1 rate-limit point) with a short timeout.
+    Result is cached per-request via the request cache so repeated calls
+    within the same API request only hit GitHub once.
+
+    Returns True on network errors to avoid blocking when GitHub is unreachable
+    (preserves current behavior — the downstream call will fail and be caught).
+    """
+    cache_key = f"pat_valid:{token[:8]}"
+    cached = get_request_cache_value(cache_key)
+    if isinstance(cached, bool):
+        return cached
+
+    try:
+        client = get_github_client()
+        response = await client.get(
+            "https://api.github.com/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=5.0,
+        )
+        is_valid = response.status_code == 200
+        set_request_cache_value(cache_key, is_valid)
+        return is_valid
+    except Exception:
+        # Network error — assume valid to avoid blocking
+        set_request_cache_value(cache_key, True)
+        return True
+
+
 async def resolve_github_token(
     db: AsyncSession,
     current_user: User,
@@ -154,11 +190,19 @@ async def resolve_github_token(
     from app.domain import github_app_installation_ops, org_member_ops, product_ops
     from app.services.github.app_auth import github_app_auth
 
-    # 1. Try current user's PAT first
+    # 1. Try current user's PAT first — but validate it works
     preferences = await preferences_ops.get_by_user_id(db, current_user.id)
     token = preferences_ops.get_decrypted_token(preferences) if preferences else None
     if token:
-        return token
+        if await _is_token_valid(token):
+            return token
+        logger.warning(
+            "User %s has an invalid/expired GitHub PAT — falling through to GitHub App token",
+            current_user.id,
+        )
+        # Clear the invalid PAT so it doesn't block future requests
+        await preferences_ops.clear_github_token(db, current_user.id)
+        await db.commit()
 
     # 2. Try GitHub App installation token for the product's org
     product = await product_ops.get(db, product_id)
@@ -166,9 +210,7 @@ async def resolve_github_token(
         return None
 
     if github_app_auth.is_configured:
-        installation = await github_app_installation_ops.get_for_org(
-            db, product.organization_id
-        )
+        installation = await github_app_installation_ops.get_for_org(db, product.organization_id)
         if installation and not installation.suspended_at:
             try:
                 app_token = await github_app_auth.get_installation_token(
@@ -182,12 +224,12 @@ async def resolve_github_token(
                     "falling back to org member PAT"
                 )
 
-    # 3. Fallback: find a PAT from an org admin/owner
+    # 3. Fallback: find a valid PAT from an org admin/owner
     members = await org_member_ops.get_members_with_tokens(db, product.organization_id)
     for member in members:
         member_prefs = await preferences_ops.get_by_user_id(db, member.user_id)
         fallback = preferences_ops.get_decrypted_token(member_prefs) if member_prefs else None
-        if fallback:
+        if fallback and await _is_token_valid(fallback):
             return fallback
 
     return None

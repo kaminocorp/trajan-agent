@@ -994,7 +994,7 @@ async def sync_docs_to_repo(
         doc_uuids = [uuid_pkg.UUID(d) for d in request.document_ids]
         result = await db.execute(
             select(Document).where(
-                Document.id.in_(doc_uuids),  # type: ignore[union-attr]
+                Document.id.in_(doc_uuids),
                 Document.product_id == api_key.product_id,  # type: ignore[arg-type]
             )
         )
