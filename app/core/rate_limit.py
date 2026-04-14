@@ -30,6 +30,9 @@ PUBLIC_WRITE_LIMIT = RateLimitConfig(requests=120, window_seconds=60)
 PUBLIC_INTERPRET_LIMIT = RateLimitConfig(requests=30, window_seconds=60)
 PUBLIC_READ_LIMIT = RateLimitConfig(requests=120, window_seconds=60)
 
+# Partner API rate limits (keyed by org API key ID)
+PARTNER_READ_LIMIT = RateLimitConfig(requests=60, window_seconds=60)
+
 
 # Type alias for clarity
 UserId: TypeAlias = uuid_pkg.UUID
