@@ -101,7 +101,12 @@ async def public_domain_middleware(
         return await call_next(request)
 
     path = request.url.path
-    is_allowed = path == "/" or path == "/health" or path.startswith("/api/v1/public/")
+    is_allowed = (
+        path == "/"
+        or path == "/health"
+        or path.startswith("/api/v1/public/")
+        or path.startswith("/api/v1/partner/")
+    )
 
     if not is_allowed:
         return JSONResponse(status_code=404, content={"detail": "Not found"})
@@ -127,10 +132,21 @@ async def public_domain_middleware(
                 "version": "1.0",
                 "docs": "https://www.trajancloud.com/docs",
                 "endpoints": {
-                    "create_ticket": "POST /api/v1/public/tickets/",
-                    "interpret_ticket": "POST /api/v1/public/tickets/interpret",
-                    "list_tickets": "GET /api/v1/public/tickets/",
-                    "get_ticket": "GET /api/v1/public/tickets/{ticket_id}",
+                    "ticket_api": {
+                        "create_ticket": "POST /api/v1/public/tickets/",
+                        "interpret_ticket": "POST /api/v1/public/tickets/interpret",
+                        "list_tickets": "GET /api/v1/public/tickets/",
+                        "get_ticket": "GET /api/v1/public/tickets/{ticket_id}",
+                    },
+                    "embed_api": {
+                        "pulse": "GET /api/v1/partner/org/pulse",
+                        "products": "GET /api/v1/partner/org/products",
+                        "product_config": "GET /api/v1/partner/org/products/{product_id}/config",
+                        "shipped": "GET /api/v1/partner/org/shipped",
+                        "contributors": "GET /api/v1/partner/org/contributors",
+                        "changelog": "GET /api/v1/partner/org/changelog",
+                        "narrative": "GET /api/v1/partner/org/narrative",
+                    },
                 },
             }
         )

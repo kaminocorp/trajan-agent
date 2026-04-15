@@ -14,7 +14,7 @@ from app.domain import repository_ops
 
 from .context import ContextBuilder
 from .prompts import AGENT_SYSTEM_PROMPT
-from .tools import AGENT_TOOLS, AgentToolExecutor
+from .tools import AGENT_TOOLS, CODE_GRAPH_TOOLS, AgentToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,8 @@ class CLIAgentService:
     ) -> tuple[dict[str, Any], AgentToolExecutor | None]:
         """Set up tool definitions and executor if GitHub is connected.
 
+        Includes code graph tools when at least one repo has been indexed.
+
         Returns:
             Tuple of (kwargs dict to spread into API call, executor or None).
         """
@@ -169,8 +171,17 @@ class CLIAgentService:
         if not repos:
             return {}, None
 
-        executor = AgentToolExecutor(github_token, repos[:3])
-        return {"tools": AGENT_TOOLS}, executor
+        # Check if any repos have been indexed
+        has_indexed = any(
+            getattr(r, "indexing_status", None) == "completed" for r in repos
+        )
+
+        tools = list(AGENT_TOOLS)
+        if has_indexed:
+            tools.extend(CODE_GRAPH_TOOLS)
+
+        executor = AgentToolExecutor(github_token, repos[:3], db=db if has_indexed else None)
+        return {"tools": tools}, executor
 
     @staticmethod
     async def _handle_tool_use(
