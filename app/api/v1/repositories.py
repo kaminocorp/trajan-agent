@@ -52,6 +52,8 @@ def _serialize_repository(r):
         "forks_count": r.forks_count,
         "source_type": getattr(r, "source_type", "github"),
         "has_token": bool(getattr(r, "encrypted_token", None)),
+        "indexing_status": getattr(r, "indexing_status", None),
+        "last_indexed_at": r.last_indexed_at.isoformat() if getattr(r, "last_indexed_at", None) else None,
         "product_id": str(r.product_id) if r.product_id else None,
         "imported_by_user_id": str(r.imported_by_user_id),
         "created_at": r.created_at.isoformat(),
