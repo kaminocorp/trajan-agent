@@ -20,6 +20,8 @@ dependencies = [
     "apscheduler>=3.10.0",
     "cachetools>=5.0.0",
     "mcp[server]>=1.0.0",
+    "tree-sitter>=0.21.3,<0.22",
+    "tree-sitter-languages>=1.10.0",
 ]
 
 [project.optional-dependencies]
@@ -73,7 +75,7 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["jose", "jose.*", "cachetools", "cachetools.*", "apscheduler", "apscheduler.*"]
+module = ["jose", "jose.*", "cachetools", "cachetools.*", "apscheduler", "apscheduler.*", "tree_sitter", "tree_sitter.*", "tree_sitter_languages", "tree_sitter_languages.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -11,6 +11,8 @@ from app.models.changelog import (
     ChangelogEntryCreate,
     ChangelogEntryUpdate,
 )
+from app.models.code_edge import CodeEdge, CodeEdgeType
+from app.models.code_node import CodeNode, CodeNodeType
 from app.models.commit_stats_cache import CommitStatsCache
 from app.models.custom_doc_job import CustomDocJob, JobStatus
 from app.models.dashboard_shipped_summary import DashboardShippedSummary
@@ -70,7 +72,7 @@ from app.models.product_api_key import (
     ProductApiKeyRead,
 )
 from app.models.progress_summary import ProgressSummary
-from app.models.repository import Repository, RepositoryCreate, RepositoryUpdate
+from app.models.repository import IndexingStatus, Repository, RepositoryCreate, RepositoryUpdate
 from app.models.subscription import (
     PlanTier,
     Subscription,
@@ -83,6 +85,10 @@ from app.models.user_preferences import UserPreferences
 from app.models.work_item import WorkItem, WorkItemComplete, WorkItemCreate, WorkItemUpdate
 
 __all__ = [
+    "CodeEdge",
+    "CodeEdgeType",
+    "CodeNode",
+    "CodeNodeType",
     "Announcement",
     "AnnouncementRead",
     "AnnouncementVariant",
@@ -128,6 +134,7 @@ __all__ = [
     "ProductApiKeyCreate",
     "ProductApiKeyCreateResponse",
     "ProductApiKeyRead",
+    "IndexingStatus",
     "Repository",
     "RepositoryCreate",
     "RepositoryUpdate",

@@ -7,6 +7,7 @@ from app.api.v1 import (
     api_keys,
     app_info,
     changelog,
+    code_graph,
     documents,
     feedback,
     github,
@@ -57,3 +58,4 @@ api_router.include_router(mcp.router)
 api_router.include_router(org_api_keys.router)
 api_router.include_router(partner.router)
 api_router.include_router(partner_config.router)
+api_router.include_router(code_graph.router)
