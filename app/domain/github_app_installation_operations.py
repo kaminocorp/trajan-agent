@@ -35,10 +35,38 @@ class GitHubAppInstallationOperations(BaseOperations[GitHubAppInstallation]):
     async def get_for_org(
         self, db: AsyncSession, organization_id: UUID
     ) -> GitHubAppInstallation | None:
-        """Get the GitHub App installation for an organization."""
+        """Get a GitHub App installation for an organization.
+
+        Returns the first active installation found. For orgs with multiple
+        installations (repos across different GitHub accounts), prefer
+        get_for_org_and_account() or get_all_for_org().
+        """
         result = await db.execute(
             select(GitHubAppInstallation).where(
                 GitHubAppInstallation.organization_id == organization_id
+            )
+        )
+        return result.scalars().first()
+
+    async def get_all_for_org(
+        self, db: AsyncSession, organization_id: UUID
+    ) -> list[GitHubAppInstallation]:
+        """Get all GitHub App installations for an organization."""
+        result = await db.execute(
+            select(GitHubAppInstallation).where(
+                GitHubAppInstallation.organization_id == organization_id
+            )
+        )
+        return list(result.scalars().all())
+
+    async def get_for_org_and_account(
+        self, db: AsyncSession, organization_id: UUID, github_account_login: str
+    ) -> GitHubAppInstallation | None:
+        """Get the installation matching a specific GitHub account within an org."""
+        result = await db.execute(
+            select(GitHubAppInstallation).where(
+                GitHubAppInstallation.organization_id == organization_id,
+                GitHubAppInstallation.github_account_login == github_account_login,
             )
         )
         return result.scalar_one_or_none()
