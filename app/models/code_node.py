@@ -57,12 +57,7 @@ class CodeNode(UUIDMixin, TimestampMixin, SQLModel, table=True):
 
     type: CodeNodeType = Field(
         sa_column=Column(
-            Enum(
-                CodeNodeType,
-                name="codenodetype",
-                native_enum=True,
-                values_callable=lambda e: [m.value for m in e],
-            ),
+            Enum(CodeNodeType, name="codenodetype", native_enum=True),
             nullable=False,
         ),
     )
