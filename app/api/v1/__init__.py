@@ -1,6 +1,7 @@
 from app.api.v1 import (
     api_keys,
     app_info,
+    code_graph,
     documents,
     github,
     infra,
@@ -18,6 +19,7 @@ from app.api.v1 import (
 
 __all__ = [
     "api_keys",
+    "code_graph",
     "infra",
     "org_api_keys",
     "products",

@@ -1,6 +1,7 @@
 from app.domain.announcement_operations import announcement_ops
 from app.domain.app_info_operations import app_info_ops
 from app.domain.changelog_operations import changelog_ops
+from app.domain.code_graph_operations import code_graph_ops
 from app.domain.commit_stats_cache_operations import commit_stats_cache_ops
 from app.domain.dashboard_shipped_operations import dashboard_shipped_ops
 from app.domain.dashboard_stats_cache_operations import dashboard_stats_cache_ops
@@ -29,6 +30,7 @@ from app.domain.work_item_operations import work_item_ops
 
 __all__ = [
     "changelog_ops",
+    "code_graph_ops",
     "org_api_key_ops",
     "org_digest_preference_ops",
     "announcement_ops",
