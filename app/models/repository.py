@@ -1,12 +1,24 @@
+import enum
 import uuid as uuid_pkg
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import Column, ForeignKey, Index
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlmodel import Field, Relationship, SQLModel
 
 from app.models.base import TimestampMixin, UUIDMixin
+
+
+class IndexingStatus(str, enum.Enum):
+    """Status of codebase indexing for a repository."""
+
+    PENDING = "pending"
+    INDEXING = "indexing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
 
 if TYPE_CHECKING:
     from app.models.product import Product
@@ -98,6 +110,14 @@ class Repository(RepositoryBase, UUIDMixin, TimestampMixin, table=True):
     )
     last_sync_commit_sha: str | None = Field(default=None, max_length=40)
     last_sync_pr_url: str | None = Field(default=None, max_length=500)
+
+    # Code Map indexing status
+    indexing_status: str | None = Field(default=None, max_length=20)
+    last_indexed_at: datetime | None = Field(
+        default=None,
+        sa_type=DateTime(timezone=True),
+    )
+    index_error: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
 
     # Relationships
     product: Optional["Product"] = Relationship(back_populates="repositories")
