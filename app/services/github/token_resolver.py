@@ -6,7 +6,10 @@ Resolves the best available token for a repository, checking:
 3. User's account-wide PAT (legacy fallback)
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +18,12 @@ from app.core.audit import log_token_resolved
 from app.core.encryption import token_encryption
 from app.models import Repository
 from app.services.github.app_auth import github_app_auth
+
+if TYPE_CHECKING:
+    from app.domain.github_app_installation_operations import (
+        GitHubAppInstallationRepoOperations,
+    )
+    from app.models.github_app_installation import GitHubAppInstallation
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +81,17 @@ class TokenResolver:
         """Resolve a token with org context.
 
         Prefers App installation for the org, falls back to user PAT.
+        Tries all installations when the org has multiple GitHub accounts.
         """
         from app.domain import github_app_installation_ops
 
         if github_app_auth.is_configured:
-            installation = await github_app_installation_ops.get_for_org(self.db, organization_id)
-            if installation and not installation.suspended_at:
+            installations = await github_app_installation_ops.get_all_for_org(
+                self.db, organization_id
+            )
+            for installation in installations:
+                if installation.suspended_at:
+                    continue
                 try:
                     token = await github_app_auth.get_installation_token(
                         installation.installation_id
@@ -85,7 +99,8 @@ class TokenResolver:
                     return token, "github_app"
                 except Exception:
                     logger.warning(
-                        f"Failed to get App token for org {organization_id}, falling back to PAT"
+                        f"Failed to get App token for installation "
+                        f"{installation.installation_id}, trying next"
                     )
 
         pat_token = await self._try_user_pat(user_id)
@@ -95,7 +110,12 @@ class TokenResolver:
         return None, "none"
 
     async def _try_app_token(self, repository: Repository) -> str | None:
-        """Try to get a GitHub App installation token for this repo."""
+        """Try to get a GitHub App installation token for this repo.
+
+        When the org has multiple installations (repos across different GitHub
+        accounts), matches the repo owner to the correct installation first,
+        then falls back to trying all installations.
+        """
         from app.domain import (
             github_app_installation_ops,
             github_app_installation_repo_ops,
@@ -106,17 +126,49 @@ class TokenResolver:
         if not product or not product.organization_id:
             return None
 
-        installation = await github_app_installation_ops.get_for_org(
+        # Extract the GitHub owner from repo full_name (e.g. "owner/repo")
+        repo_owner = (repository.full_name or "").split("/")[0] if repository.full_name else None
+
+        # Try matching installation by GitHub account login first
+        if repo_owner:
+            installation = await github_app_installation_ops.get_for_org_and_account(
+                self.db, product.organization_id, repo_owner
+            )
+            if installation and not installation.suspended_at:
+                token = await self._try_installation_token(
+                    installation, repository, github_app_installation_repo_ops
+                )
+                if token:
+                    return token
+
+        # Fall back to trying all installations for the org
+        installations = await github_app_installation_ops.get_all_for_org(
             self.db, product.organization_id
         )
-        if not installation or installation.suspended_at:
-            return None
+        for installation in installations:
+            if installation.suspended_at:
+                continue
+            if repo_owner and installation.github_account_login == repo_owner:
+                continue  # Already tried above
+            token = await self._try_installation_token(
+                installation, repository, github_app_installation_repo_ops
+            )
+            if token:
+                return token
 
-        # Check if installation has access to this specific repo
+        return None
+
+    async def _try_installation_token(
+        self,
+        installation: GitHubAppInstallation,
+        repository: Repository,
+        repo_ops: GitHubAppInstallationRepoOperations,
+    ) -> str | None:
+        """Try to get a token from a specific installation for a repository."""
         if installation.repository_selection != "all":
             if not repository.github_id:
                 return None
-            has_access = await github_app_installation_repo_ops.exists(
+            has_access = await repo_ops.exists(
                 self.db,
                 installation_id=installation.id,
                 github_repo_id=repository.github_id,
