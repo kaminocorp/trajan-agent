@@ -24,7 +24,7 @@ from app.api.deps import (
     get_db_with_rls,
     require_product_subscription,
 )
-from app.domain import preferences_ops, product_ops, repository_ops
+from app.domain import product_ops, repository_ops
 from app.models.custom_doc_job import CustomDocJob
 from app.models.user import User
 from app.schemas.docs import (
@@ -36,6 +36,7 @@ from app.services.docs import job_store
 from app.services.docs.custom_generator import CustomDocGenerator
 from app.services.docs.types import CustomDocRequest
 from app.services.github import GitHubService
+from app.services.github.token_resolver import TokenResolver
 
 logger = logging.getLogger(__name__)
 
@@ -134,15 +135,6 @@ async def generate_custom_document(
     # Check rate limit using the product's org tier (not user's default org)
     await check_custom_doc_rate_limit(sub_ctx, current_user, db)
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get repositories for the product (RLS enforces access)
     repositories = await repository_ops.get_by_product(db, product_id=product_id)
 
@@ -150,6 +142,16 @@ async def generate_custom_document(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No repositories linked to this product. Add a repository first.",
+        )
+
+    # Resolve token via primary repo (per-repo > GitHub App > PAT)
+    resolver = TokenResolver(db)
+    github_token, _ = await resolver.resolve_token(repositories[0], current_user.id)
+    if not github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
         )
 
     # Convert Pydantic schema to dataclass
@@ -408,21 +410,22 @@ async def generate_assessment(
 
     product = sub_ctx.product
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get repositories for the product
     repositories = await repository_ops.get_by_product(db, product_id=product_id)
     if not repositories:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No repositories linked to this product. Add a repository first.",
+        )
+
+    # Resolve token via primary repo (per-repo > GitHub App > PAT)
+    resolver = TokenResolver(db)
+    github_token, _ = await resolver.resolve_token(repositories[0], current_user.id)
+    if not github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
         )
 
     # Generate the assessment
