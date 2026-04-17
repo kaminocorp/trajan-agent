@@ -67,7 +67,12 @@ class CodeEdge(UUIDMixin, TimestampMixin, SQLModel, table=True):
 
     type: CodeEdgeType = Field(
         sa_column=Column(
-            Enum(CodeEdgeType, name="codeedgetype", native_enum=True),
+            Enum(
+                CodeEdgeType,
+                name="codeedgetype",
+                native_enum=True,
+                values_callable=lambda e: [m.value for m in e],
+            ),
             nullable=False,
         ),
     )
