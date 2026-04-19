@@ -179,6 +179,8 @@ async def resolve_github_token(
     db: AsyncSession,
     current_user: User,
     product_id: uuid_pkg.UUID,
+    *,
+    repo_full_name: str | None = None,
 ) -> str | None:
     """Resolve a GitHub token for API access.
 
@@ -186,6 +188,10 @@ async def resolve_github_token(
     1. Current user's own PAT (preferred — respects their repo access scope)
     2. GitHub App installation token (org-level, short-lived)
     3. Org owner/admin PAT (fallback for collaborative read access)
+
+    When repo_full_name is provided (e.g. "owner/repo"), the installation
+    matching that GitHub account is tried first. This is important when an
+    org has repos across multiple GitHub accounts with separate App installs.
     """
     from app.domain import github_app_installation_ops, org_member_ops, product_ops
     from app.services.github.app_auth import github_app_auth
@@ -210,8 +216,36 @@ async def resolve_github_token(
         return None
 
     if github_app_auth.is_configured:
-        installation = await github_app_installation_ops.get_for_org(db, product.organization_id)
-        if installation and not installation.suspended_at:
+        repo_owner = repo_full_name.split("/")[0] if repo_full_name else None
+
+        # 2a. If we know the repo owner, try the matching installation first
+        if repo_owner:
+            installation = await github_app_installation_ops.get_for_org_and_account(
+                db, product.organization_id, repo_owner
+            )
+            if installation and not installation.suspended_at:
+                try:
+                    app_token = await github_app_auth.get_installation_token(
+                        installation.installation_id
+                    )
+                    if app_token:
+                        return app_token
+                except Exception:
+                    logger.warning(
+                        f"Failed to get GitHub App token for installation "
+                        f"{installation.installation_id} ({repo_owner})"
+                    )
+
+        # 2b. Try all installations for the org
+        installations = await github_app_installation_ops.get_all_for_org(
+            db, product.organization_id
+        )
+        for installation in installations:
+            if installation.suspended_at:
+                continue
+            # Skip the one we already tried
+            if repo_owner and installation.github_account_login == repo_owner:
+                continue
             try:
                 app_token = await github_app_auth.get_installation_token(
                     installation.installation_id
@@ -220,8 +254,8 @@ async def resolve_github_token(
                     return app_token
             except Exception:
                 logger.warning(
-                    f"Failed to get GitHub App token for org {product.organization_id}, "
-                    "falling back to org member PAT"
+                    f"Failed to get GitHub App token for installation "
+                    f"{installation.installation_id}, trying next"
                 )
 
     # 3. Fallback: find a valid PAT from an org admin/owner
