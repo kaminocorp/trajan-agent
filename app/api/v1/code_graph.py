@@ -115,7 +115,9 @@ async def trigger_indexing(
         )
 
     # Resolve GitHub token
-    github_token = await resolve_github_token(db, current_user, repo.product_id)
+    github_token = await resolve_github_token(
+        db, current_user, repo.product_id, repo_full_name=repo.full_name
+    )
     if not github_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -537,7 +539,9 @@ async def get_file_content(
     await check_product_viewer_access(db, repo.product_id, current_user.id)
 
     # Resolve GitHub token
-    github_token = await resolve_github_token(db, current_user, repo.product_id)
+    github_token = await resolve_github_token(
+        db, current_user, repo.product_id, repo_full_name=repo.full_name
+    )
     if not github_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

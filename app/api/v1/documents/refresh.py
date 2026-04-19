@@ -6,7 +6,7 @@ from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db_with_rls
-from app.domain import document_ops, preferences_ops, product_ops, repository_ops
+from app.domain import document_ops, product_ops, repository_ops
 from app.models.user import User
 from app.schemas.docs import (
     BulkRefreshResponse,
@@ -15,6 +15,7 @@ from app.schemas.docs import (
 )
 from app.services.docs.document_refresher import DocumentRefresher
 from app.services.github import GitHubService
+from app.services.github.token_resolver import TokenResolver
 
 
 async def refresh_document(
@@ -41,21 +42,23 @@ async def refresh_document(
             detail="Document is not linked to a product",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get linked repositories (RLS enforces product access)
     repos = await repository_ops.get_github_repos_by_product(db, product_id=doc.product_id)
     if not repos:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No GitHub repositories linked to this product",
+        )
+
+    # Resolve token — prefer the document's repo if linked, else primary
+    resolver = TokenResolver(db)
+    token_repo = next((r for r in repos if r.id == doc.repository_id), repos[0])
+    github_token, _ = await resolver.resolve_token(token_repo, current_user.id)
+    if not github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
         )
 
     github_service = GitHubService(github_token)
@@ -90,21 +93,22 @@ async def refresh_all_documents(
             detail="Product not found",
         )
 
-    # Get user's GitHub token (decrypted)
-    preferences = await preferences_ops.get_by_user_id(db, current_user.id)
-    github_token = preferences_ops.get_decrypted_token(preferences) if preferences else None
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="GitHub token not configured. Please add your GitHub token in Settings.",
-        )
-
     # Get linked repositories (RLS enforces product access)
     repos = await repository_ops.get_github_repos_by_product(db, product_id=product_id)
     if not repos:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No GitHub repositories linked to this product",
+        )
+
+    # Resolve token via primary repo (per-repo > GitHub App > PAT)
+    resolver = TokenResolver(db)
+    github_token, _ = await resolver.resolve_token(repos[0], current_user.id)
+    if not github_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token available. Connect a GitHub App, add a per-repo token, "
+            "or configure a personal access token in Settings.",
         )
 
     github_service = GitHubService(github_token)
