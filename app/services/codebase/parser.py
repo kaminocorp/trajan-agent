@@ -162,7 +162,7 @@ def _get_parser(language: str) -> Any:
     try:
         lang = tsl.get_language(language)
         parser = ts.Parser()
-        parser.language = lang
+        parser.set_language(lang)
         return parser
     except Exception:
         logger.warning(f"No tree-sitter grammar available for {language}")
