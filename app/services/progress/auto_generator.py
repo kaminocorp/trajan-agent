@@ -42,6 +42,22 @@ class AutoProgressReport:
     duration_seconds: float = 0.0
 
 
+@dataclass(frozen=True)
+class ProductWorkTarget:
+    """Immutable per-product work unit from :func:`enumerate_eligible_products`.
+
+    Carries only primitives + the decrypted GitHub token (resolved
+    during bootstrap because ``preferences`` is RLS-protected).
+    The scoped half reloads ``Product`` / ``Repository`` rows under
+    RLS, so no ORM object crosses sessions.
+    """
+
+    product_id: uuid_pkg.UUID
+    organization_id: uuid_pkg.UUID
+    owner_user_id: uuid_pkg.UUID
+    github_token: str
+
+
 class AutoProgressGenerator:
     """Orchestrator that runs auto-progress for all eligible organizations."""
 
@@ -500,3 +516,124 @@ def _get_period_start(period: str) -> datetime:
 
 
 auto_progress_generator = AutoProgressGenerator()
+
+
+# ---------------------------------------------------------------------------
+# Bypass-then-scope entry points (Phase 2c)
+#
+# ``run_for_all_orgs`` above is preserved as a single-session wrapper for
+# tests and dev-only callers. The scheduler path uses the two functions
+# below: bootstrap enumeration on ``cron_session_maker`` (BYPASSRLS) and
+# per-product regeneration on an RLS-scoped ``trajan_app`` session whose
+# ``app.current_user_id`` has been set to the product's owning user.
+# ---------------------------------------------------------------------------
+
+
+async def enumerate_eligible_products(
+    cron_db: AsyncSession,
+) -> list[ProductWorkTarget]:
+    """Bootstrap half: cross-tenant enumeration of auto-progress work.
+
+    Runs on ``cron_session_maker`` (BYPASSRLS) because:
+
+    1. ``organizations.settings['auto_progress_enabled']`` lookup is
+       cross-tenant by definition — no single user has visibility
+       into every org with the flag set.
+    2. GitHub token resolution reads ``preferences`` (RLS-protected,
+       token-per-member) to find any org owner/admin with a stored
+       token. Under ``trajan_app`` with no context, zero tokens
+       resolve and every auto-progress run silently no-ops.
+
+    Per-org token resolution is serial rather than batched: the
+    resolver walks members in role-priority order and short-circuits
+    at the first valid token. Fan-out parallelism wouldn't buy much
+    for ~N orgs with ~few admins each.
+    """
+    from app.domain import organization_ops, product_ops, repository_ops
+
+    targets: list[ProductWorkTarget] = []
+
+    orgs = await organization_ops.get_orgs_with_auto_progress(cron_db)
+    logger.info(f"[auto-progress] Bootstrap: {len(orgs)} orgs with auto-progress enabled")
+
+    for org in orgs:
+        github_token = await token_resolver.resolve_for_org(cron_db, org.id)
+        if not github_token:
+            logger.warning(
+                f"[auto-progress] Org {org.id} ({org.name}): no GitHub token, skipping"
+            )
+            continue
+
+        products = await product_ops.get_by_organization(cron_db, org.id)
+        for product in products[:MAX_PRODUCTS_PER_ORG]:
+            repos = await repository_ops.get_github_repos_by_product(
+                cron_db, product.id
+            )
+            if not repos:
+                continue
+            targets.append(
+                ProductWorkTarget(
+                    product_id=product.id,
+                    organization_id=org.id,
+                    owner_user_id=org.owner_id,
+                    github_token=github_token,
+                )
+            )
+
+    logger.info(f"[auto-progress] Bootstrap: enumerated {len(targets)} eligible products")
+    return targets
+
+
+async def regenerate_for_product(
+    db: AsyncSession,
+    target: ProductWorkTarget,
+    report: AutoProgressReport,
+) -> bool:
+    """Scoped half: regenerate summaries for a single product.
+
+    **Contract:** caller has set RLS context to
+    ``target.owner_user_id`` on ``db``. Every read below
+    (``products``, ``repositories``, ``progress_summaries``,
+    ``dashboard_shipped_summaries``, ``org_digest_preferences``) is
+    evaluated by policies against that user. The
+    RLS-rehydration listener in ``database.py`` keeps the context
+    alive across the mid-flight ``commit()``s that
+    ``_process_product`` issues (per-period commits isolate one
+    product's failure from siblings).
+
+    Returns True iff summaries were regenerated (not skipped).
+    """
+    from app.domain import product_ops, repository_ops
+
+    product = await product_ops.get(db, target.product_id)
+    if product is None:
+        logger.warning(
+            f"[auto-progress] Product {target.product_id} invisible under owner "
+            f"RLS context — skipping"
+        )
+        report.products_skipped += 1
+        return False
+
+    repos = await repository_ops.get_github_repos_by_product(db, target.product_id)
+    if not repos:
+        report.products_skipped += 1
+        return False
+
+    github = GitHubReadOperations(target.github_token)
+    try:
+        async with asyncio.timeout(PRODUCT_TIMEOUT_SECONDS):
+            regenerated = await auto_progress_generator._process_product(
+                db, product, repos, github
+            )
+    except TimeoutError:
+        error_msg = f"Product {target.product_id}: timeout ({PRODUCT_TIMEOUT_SECONDS}s)"
+        logger.error(f"[auto-progress] {error_msg}")
+        report.errors.append(error_msg)
+        report.products_failed += 1
+        return False
+
+    if regenerated:
+        report.products_regenerated += 1
+    else:
+        report.products_skipped += 1
+    return regenerated

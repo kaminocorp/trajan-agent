@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rls import set_rls_user_context
 from app.models.document import Document
 from app.models.repository import Repository
 from app.services.docs.types import DocumentSyncStatus, ImportResult, SyncResult
@@ -55,9 +56,13 @@ class DocsSyncService:
         self,
         db: AsyncSession,
         github_service: GitHubService,
+        user_id: uuid_pkg.UUID,
     ) -> None:
         self.db = db
         self.github_service = github_service
+        # Acting user for RLS context re-arm after mid-flight commits.
+        # See ``DocumentRefresher`` for the full rationale.
+        self.user_id = user_id
 
     async def import_from_repo(
         self,
@@ -196,10 +201,7 @@ class DocsSyncService:
             # Optionally open a PR (only when syncing to a non-default branch)
             pr_url: str | None = None
             pr_number: int | None = None
-            if (
-                repository.sync_create_pr
-                and target_branch != default_branch
-            ):
+            if repository.sync_create_pr and target_branch != default_branch:
                 pr_info = await self.github_service.create_pull_request(
                     owner,
                     repo_name,
@@ -232,8 +234,7 @@ class DocsSyncService:
                     doc.sync_status = "synced"
                 except Exception as e:
                     logger.warning(
-                        f"Failed to fetch SHA for {path} after commit "
-                        f"— will re-sync next time: {e}"
+                        f"Failed to fetch SHA for {path} after commit — will re-sync next time: {e}"
                     )
                     doc.github_path = path
                     doc.sync_status = "local_changes"
@@ -241,8 +242,7 @@ class DocsSyncService:
             await self.db.commit()
 
             logger.info(
-                f"Synced {len(files_to_commit)} files to "
-                f"{repository.full_name}:{target_branch}"
+                f"Synced {len(files_to_commit)} files to {repository.full_name}:{target_branch}"
             )
 
             return SyncResult(
@@ -435,6 +435,8 @@ class DocsSyncService:
             doc.title = extract_title(file_content.content, doc.github_path)
 
             await self.db.commit()
+            # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+            await set_rls_user_context(self.db, self.user_id)
             await self.db.refresh(doc)
             return doc
 
@@ -471,7 +473,7 @@ class DocsSyncService:
             # Strip the default "docs/" and prepend the configured prefix
             prefix = path_prefix.rstrip("/") + "/"
             if default_path.startswith("docs/"):
-                return prefix + default_path[len("docs/"):]
+                return prefix + default_path[len("docs/") :]
             return prefix + default_path
         return default_path
 
