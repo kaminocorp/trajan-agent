@@ -18,12 +18,14 @@ V1 Flow (legacy, use_v2=False):
 
 import asyncio
 import logging
+import uuid as uuid_pkg
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.domain.repository_operations import repository_ops
 from app.models.document import Document
@@ -72,12 +74,14 @@ class DocumentOrchestrator:
         self,
         db: AsyncSession,
         product: Product,
+        user_id: uuid_pkg.UUID,
         github_service: GitHubService | None = None,
         *,
         github_service_factory: GitHubServiceFactory | None = None,
     ) -> None:
         self.db = db
         self.product = product
+        self.user_id = user_id
         self._github_service = github_service
         self._github_service_factory = github_service_factory
 
@@ -88,16 +92,23 @@ class DocumentOrchestrator:
             github_service_factory=github_service_factory,
         )
         self.documentation_planner = DocumentationPlanner()
-        self.document_generator = DocumentGenerator(db)
+        self.document_generator = DocumentGenerator(db, user_id=user_id)
 
         # V1 sub-agents use the shared GitHubService (fallback for now).
         # Per-repo resolution for sub-agents can be added later.
+        # ``user_id`` is threaded into every sub-agent so they can re-arm
+        # RLS context after mid-flight commits on the shared ``self.db``
+        # session — without this, the first sub-agent's commit drops
+        # ``SET LOCAL`` and every later sub-agent's INSERT fails under
+        # ``trajan_app``.
         if github_service:
-            self.changelog_agent = ChangelogAgent(db, product, github_service=github_service)
-            self.blueprint_agent = BlueprintAgent(db, product, github_service)
-            self.plans_agent = PlansAgent(db, product, github_service)
+            self.changelog_agent = ChangelogAgent(
+                db, product, github_service=github_service, user_id=user_id
+            )
+            self.blueprint_agent = BlueprintAgent(db, product, github_service, user_id=user_id)
+            self.plans_agent = PlansAgent(db, product, github_service, user_id=user_id)
         else:
-            self.changelog_agent = ChangelogAgent(db, product)
+            self.changelog_agent = ChangelogAgent(db, product, user_id=user_id)
             self.blueprint_agent = None  # type: ignore[assignment]
             self.plans_agent = None  # type: ignore[assignment]
 
@@ -318,9 +329,12 @@ class DocumentOrchestrator:
         Uses a fresh session to avoid transaction timeout issues.
         """
         from app.core.database import async_session_maker
+        from app.core.rls import set_rls_user_context
 
         try:
             async with async_session_maker() as session:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                await set_rls_user_context(session, self.user_id)
                 product = await session.get(Product, self.product.id)
                 if product:
                     product.docs_codebase_fingerprint = fingerprint
@@ -547,6 +561,11 @@ class DocumentOrchestrator:
 
         if imported:
             await self.db.commit()
+            # Commit dropped SET LOCAL; re-arm before the refresh loop —
+            # each ``refresh(doc)`` opens a new transaction that needs
+            # RLS context, otherwise under ``trajan_app`` the refresh
+            # SELECTs silently return zero rows.
+            await set_rls_user_context(self.db, self.user_id)
             # Refresh all imported docs
             for doc in imported:
                 await self.db.refresh(doc)
@@ -562,6 +581,7 @@ class DocumentOrchestrator:
         can take minutes, we use a fresh session for each progress update.
         """
         from app.core.database import async_session_maker
+        from app.core.rls import set_rls_user_context
         from app.models.product import Product
 
         progress_data = {
@@ -572,6 +592,8 @@ class DocumentOrchestrator:
 
         try:
             async with async_session_maker() as session:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                await set_rls_user_context(session, self.user_id)
                 # Fetch fresh product instance in new transaction
                 product = await session.get(Product, self.product.id)
                 if product:

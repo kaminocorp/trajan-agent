@@ -7,12 +7,14 @@ documentation is needed.
 """
 
 import logging
+import uuid as uuid_pkg
 from typing import Any, cast
 
 import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.domain.repository_operations import repository_ops
 from app.models.document import Document
@@ -37,10 +39,14 @@ class BlueprintAgent:
         db: AsyncSession,
         product: Product,
         github_service: GitHubService,
+        user_id: uuid_pkg.UUID,
     ) -> None:
         self.db = db
         self.product = product
         self.github_service = github_service
+        # Acting user — used to re-arm RLS context after each per-doc
+        # commit. See ``DocumentGenerator`` for rationale.
+        self.user_id = user_id
         self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def run(self) -> BlueprintResult:
@@ -172,6 +178,9 @@ class BlueprintAgent:
         )
         self.db.add(doc)
         await self.db.commit()
+        # Commit dropped SET LOCAL; re-arm before the refresh SELECT and
+        # any downstream sub-agents sharing ``self.db``.
+        await set_rls_user_context(self.db, self.user_id)
         await self.db.refresh(doc)
         return doc
 
