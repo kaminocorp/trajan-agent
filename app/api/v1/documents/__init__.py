@@ -96,9 +96,7 @@ router.add_api_route(
 )
 router.add_api_route("/{document_id}/pull-remote", pull_remote_changes, methods=["POST"])
 router.add_api_route("/products/{product_id}/sync-docs", sync_docs_to_repo, methods=["POST"])
-router.add_api_route(
-    "/repositories/{repository_id}/sync-config", get_sync_config, methods=["GET"]
-)
+router.add_api_route("/repositories/{repository_id}/sync-config", get_sync_config, methods=["GET"])
 router.add_api_route(
     "/repositories/{repository_id}/sync-config", update_sync_config, methods=["PATCH"]
 )

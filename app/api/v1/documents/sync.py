@@ -61,7 +61,7 @@ async def import_docs_from_repo(
         if not github_token:
             continue
         github_service = GitHubService(github_token)
-        sync_service = DocsSyncService(db, github_service)
+        sync_service = DocsSyncService(db, github_service, user_id=current_user.id)
         result = await sync_service.import_from_repo(repo)
         total_imported += result.imported
         total_updated += result.updated
@@ -118,7 +118,7 @@ async def get_docs_sync_status(
         )
 
     github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
+    sync_service = DocsSyncService(db, github_service, user_id=current_user.id)
 
     statuses = await sync_service.check_for_updates(product_id=str(product_id))
 
@@ -176,7 +176,7 @@ async def pull_remote_changes(
         )
 
     github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
+    sync_service = DocsSyncService(db, github_service, user_id=current_user.id)
 
     updated_doc = await sync_service.pull_remote_changes(document_id=str(document_id))
 
@@ -261,9 +261,7 @@ async def sync_docs_to_repo(
     if token_method == "github_app" and product.organization_id:
         from app.domain import github_app_installation_ops
 
-        installation = await github_app_installation_ops.get_for_org(
-            db, product.organization_id
-        )
+        installation = await github_app_installation_ops.get_for_org(db, product.organization_id)
         if installation and installation.permissions.get("contents") == "read":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -273,7 +271,7 @@ async def sync_docs_to_repo(
             )
 
     github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
+    sync_service = DocsSyncService(db, github_service, user_id=current_user.id)
 
     result = await sync_service.sync_to_repo(documents, repo, data.message)
 

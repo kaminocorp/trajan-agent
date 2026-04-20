@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rls import set_rls_user_context
 from app.domain.code_graph_operations import code_graph_ops
 from app.domain.repository_operations import repository_ops
 from app.models.code_edge import CodeEdgeType
@@ -40,7 +41,7 @@ class CodebaseIndexer:
     """Orchestrates codebase indexing: clone → parse → store.
 
     Usage:
-        indexer = CodebaseIndexer(repo_id, github_token)
+        indexer = CodebaseIndexer(repo_id, github_token, user_id)
         result = await indexer.run(db)
     """
 
@@ -48,9 +49,17 @@ class CodebaseIndexer:
         self,
         repo_id: uuid_pkg.UUID,
         github_token: str,
+        user_id: uuid_pkg.UUID,
     ) -> None:
         self.repo_id = repo_id
         self.github_token = github_token
+        # RLS context user — used to re-arm ``SET LOCAL app.current_user_id``
+        # after every ``commit()`` / ``rollback()`` on the passed session.
+        # The ``after_begin`` listener rehydrates context automatically when
+        # ``set_rls_user_context`` has been called on the session; the
+        # explicit re-calls below are belt-and-braces for the pre-listener
+        # code path.
+        self.user_id = user_id
         self._clone_dir: str | None = None
 
     async def run(self, db: AsyncSession) -> IndexingResult:
@@ -67,6 +76,9 @@ class CodebaseIndexer:
         repo.index_error = None
         await db.flush()
         await db.commit()
+        # SET LOCAL was dropped by the commit above; re-arm before the
+        # bulk inserts that follow so they run under the correct RLS user.
+        await set_rls_user_context(db, self.user_id)
 
         result = IndexingResult(
             repo_id=str(self.repo_id),
@@ -107,6 +119,8 @@ class CodebaseIndexer:
                 await db.flush()
 
             await db.commit()
+            # Final commit — re-arm in case any caller reuses the session.
+            await set_rls_user_context(db, self.user_id)
 
             logger.info(
                 f"Indexing complete for {repo.full_name if repo else self.repo_id}: "
@@ -121,6 +135,10 @@ class CodebaseIndexer:
             # Mark failed
             try:
                 await db.rollback()
+                # Rollback also resets SET LOCAL — re-arm before the refetch
+                # and the FAILED-status write, both of which touch RLS
+                # protected tables.
+                await set_rls_user_context(db, self.user_id)
                 repo = await repository_ops.get(db, self.repo_id)
                 if repo:
                     repo.indexing_status = IndexingStatus.FAILED.value

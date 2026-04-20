@@ -1054,7 +1054,7 @@ async def sync_docs_to_repo(
     from app.services.docs.sync_service import DocsSyncService
 
     github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
+    sync_service = DocsSyncService(db, github_service, user_id=api_key.created_by_user_id)
     sync_result = await sync_service.sync_to_repo(documents, repo, request.message)
 
     return MCPSyncDocsResponse(
