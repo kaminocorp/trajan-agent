@@ -106,6 +106,7 @@ async def public_domain_middleware(
         or path == "/health"
         or path.startswith("/api/v1/public/")
         or path.startswith("/api/v1/partner/")
+        or path.startswith("/api/v1/webhooks/")
     )
 
     if not is_allowed:

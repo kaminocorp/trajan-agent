@@ -29,7 +29,7 @@ class TestPlansAgentFolderClassification:
             name="Test Product",
         )
         self.github_service = MagicMock()
-        self.agent = PlansAgent(self.db, self.product, self.github_service)
+        self.agent = PlansAgent(self.db, self.product, self.github_service, user_id=MagicMock())
 
     def _create_plan(self, title: str, content: str, folder: str | None = None) -> Document:
         """Helper to create a plan document."""
