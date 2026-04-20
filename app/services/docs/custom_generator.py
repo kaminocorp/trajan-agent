@@ -23,6 +23,7 @@ import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.rls import set_rls_user_context
 from app.models.document import Document
 from app.models.product import Product
 from app.models.repository import Repository
@@ -80,9 +81,14 @@ class CustomDocGenerator:
         self,
         db: AsyncSession,
         github_service: GitHubService,
+        user_id: UUID,
     ) -> None:
         self.db = db
         self.github_service = github_service
+        # Acting user — used to re-arm RLS context after each commit on
+        # ``self.db`` so post-commit refresh SELECTs (and any further
+        # generation work) still evaluate under the correct user.
+        self.user_id = user_id
         self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def generate(
@@ -289,6 +295,8 @@ class CustomDocGenerator:
             )
             self.db.add(doc)
             await self.db.commit()
+            # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+            await set_rls_user_context(self.db, self.user_id)
             await self.db.refresh(doc)
 
             generation_time = time.time() - start_time
@@ -583,6 +591,8 @@ class CustomDocGenerator:
         )
         self.db.add(doc)
         await self.db.commit()
+        # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+        await set_rls_user_context(self.db, self.user_id)
         await self.db.refresh(doc)
         logger.info(f"Saved custom document: {title}")
         return doc

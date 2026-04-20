@@ -146,6 +146,7 @@ class TestGenerate:
 
         generator = DocumentGenerator.__new__(DocumentGenerator)
         generator.db = self.db
+        generator.user_id = self.user_id
         generator.client = AsyncMock()
         generator.client.messages.create = AsyncMock(return_value=mock_response)
 
@@ -165,6 +166,7 @@ class TestGenerate:
 
         generator = DocumentGenerator.__new__(DocumentGenerator)
         generator.db = self.db
+        generator.user_id = self.user_id
         generator.client = AsyncMock()
         generator.client.messages.create = AsyncMock(
             side_effect=anthropic.APIError(
@@ -190,6 +192,7 @@ class TestGenerate:
 
         generator = DocumentGenerator.__new__(DocumentGenerator)
         generator.db = self.db
+        generator.user_id = self.user_id
         generator.client = AsyncMock()
         generator.client.messages.create = AsyncMock(return_value=mock_response)
 
