@@ -57,6 +57,7 @@ class AnalysisOrchestrator:
         self,
         session: AsyncSession,
         product: Product,
+        user_id: uuid_pkg.UUID,
         *,
         github_service_factory: GitHubServiceFactory | None = None,
         github_service: GitHubService | None = None,
@@ -67,6 +68,9 @@ class AnalysisOrchestrator:
         Args:
             session: Database session for querying repositories and updating progress
             product: The product being analyzed (for progress updates)
+            user_id: The acting user — used as RLS context inside fresh sessions
+                opened by progress helpers. Must be the user who triggered the
+                analysis (for audit trail), not the product owner.
             github_service_factory: Per-repo factory that resolves the best token
                 (per-repo token > GitHub App > PAT) for each repository.
             github_service: Fallback GitHubService for non-repo-specific calls.
@@ -75,6 +79,7 @@ class AnalysisOrchestrator:
         """
         self.session = session
         self.product = product
+        self.user_id = user_id
         self._github_service_factory = github_service_factory
         self._github_fallback = github_service
         self.stats_extractor = StatsExtractor()
@@ -93,8 +98,7 @@ class AnalysisOrchestrator:
                 return await self._github_service_factory(repo)
             except ValueError:
                 logger.warning(
-                    f"Factory failed to resolve token for {repo.full_name}, "
-                    "trying fallback"
+                    f"Factory failed to resolve token for {repo.full_name}, trying fallback"
                 )
         if self._github_fallback:
             return self._github_fallback
@@ -461,11 +465,14 @@ class AnalysisOrchestrator:
         can take minutes, we use a fresh session for each progress update.
         """
         from app.core.database import async_session_maker
+        from app.core.rls import set_rls_user_context
 
         progress_data = progress.model_dump()
 
         try:
             async with async_session_maker() as session:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                await set_rls_user_context(session, self.user_id)
                 # Fetch fresh product instance in new transaction
                 product = await session.get(Product, self.product.id)
                 if product:

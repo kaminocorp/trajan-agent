@@ -387,6 +387,7 @@ async def _run_changelog_generation(
     Uses a fresh DB session to avoid statement timeout on long-running AI operations.
     """
     from app.core.database import async_session_maker
+    from app.core.rls import set_rls_user_context
     from app.services.changelog import ChangelogGenerator
     from app.services.github import GitHubReadOperations
 
@@ -394,6 +395,9 @@ async def _run_changelog_generation(
         try:
             product_uuid = uuid_pkg.UUID(product_id)
             user_uuid = uuid_pkg.UUID(user_id)
+
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(db, user_uuid)
 
             product = await product_ops.get(db, product_uuid)
             if not product:
@@ -431,6 +435,9 @@ async def _run_changelog_generation(
             logger.error(f"Changelog generation failed for product {product_id}: {e}")
             # Clear progress on failure
             try:
+                # SET LOCAL is reset on every commit inside generator.generate(),
+                # so re-establish RLS context before the cleanup query.
+                await set_rls_user_context(db, uuid_pkg.UUID(user_id))
                 product = await product_ops.get(db, uuid_pkg.UUID(product_id))
                 if product:
                     progress = product.docs_generation_progress

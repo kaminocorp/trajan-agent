@@ -80,7 +80,7 @@ class TestAdminAssignPlan:
         self.admin_id = uuid.uuid4()
 
     @pytest.mark.asyncio
-    @patch.object(SubscriptionOperations, "log_event")
+    @patch.object(SubscriptionOperations, "log_user_event")
     async def test_sets_plan_fields_and_manual_flag(self, mock_log):
         mock_log.return_value = MagicMock()
         sub = make_mock_subscription(tier="none", status="pending")
@@ -95,7 +95,7 @@ class TestAdminAssignPlan:
         assert sub.status == "active"
 
     @pytest.mark.asyncio
-    @patch.object(SubscriptionOperations, "log_event")
+    @patch.object(SubscriptionOperations, "log_user_event")
     async def test_logs_billing_event_with_correct_data(self, mock_log):
         mock_log.return_value = MagicMock()
         sub = make_mock_subscription(tier="indie")
@@ -103,7 +103,7 @@ class TestAdminAssignPlan:
 
         await self.ops.admin_assign_plan(self.db, sub, "scale", self.admin_id)
 
-        # log_event is an external audit call — valid to assert it was called with correct data
+        # log_user_event is an external audit call — valid to assert it was called with correct data
         call_kwargs = mock_log.call_args[1]
         assert call_kwargs["new_value"]["plan_tier"] == "scale"
         assert call_kwargs["actor_user_id"] == self.admin_id

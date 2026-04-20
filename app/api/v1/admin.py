@@ -1,5 +1,6 @@
 """Admin API endpoints for system administration."""
 
+import logging
 import uuid as uuid_pkg
 from typing import Any
 
@@ -9,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_system_admin
 from app.config.plans import PLANS
-from app.core.database import get_db
+from app.core.database import cron_session_maker, get_db
 from app.domain import organization_ops, subscription_ops
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -198,7 +201,6 @@ async def admin_set_subscription(
     org_id: uuid_pkg.UUID,
     data: AdminSubscriptionUpdate,
     admin: User = Depends(require_system_admin),
-    db: AsyncSession = Depends(get_db),
 ) -> SubscriptionResponse:
     """
     Manually assign a plan tier to an organization (admin only).
@@ -208,6 +210,13 @@ async def admin_set_subscription(
     - Beta testers
     - Manual trials
     - Enterprise deals
+
+    Runs on ``cron_session_maker`` (BYPASSRLS). A system admin is not
+    a member of the target org, so the ``billing_events_member_insert``
+    policy would reject the ``MANUAL_ASSIGNMENT`` event on the regular
+    ``trajan_app`` connection. Platform-scoped break-glass writes go
+    through the cron role; ``admin_user_id=admin.id`` is still stamped
+    as ``actor_user_id`` for the audit trail.
     """
     # Validate plan tier
     if data.plan_tier not in PLANS:
@@ -217,43 +226,48 @@ async def admin_set_subscription(
             detail=f"Invalid plan tier. Must be one of: {valid_tiers}",
         )
 
-    org = await organization_ops.get(db, org_id)
-    if not org:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Organization not found",
+    async with cron_session_maker() as db:
+        org = await organization_ops.get(db, org_id)
+        if not org:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found",
+            )
+
+        subscription = await subscription_ops.get_by_org(db, org_id)
+        if not subscription:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Subscription not found",
+            )
+
+        updated = await subscription_ops.admin_assign_plan(
+            db,
+            subscription=subscription,
+            plan_tier=data.plan_tier,
+            admin_user_id=admin.id,
+            note=data.note,
         )
 
-    subscription = await subscription_ops.get_by_org(db, org_id)
-    if not subscription:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Subscription not found",
+        await db.commit()
+
+        logger.info(
+            f"Admin {admin.id} assigned plan {data.plan_tier} to org {org_id} "
+            f"(cron_session_maker / BYPASSRLS)"
         )
 
-    # Update subscription via admin_assign_plan
-    updated = await subscription_ops.admin_assign_plan(
-        db,
-        subscription=subscription,
-        plan_tier=data.plan_tier,
-        admin_user_id=admin.id,
-        note=data.note,
-    )
-
-    await db.commit()
-
-    return SubscriptionResponse(
-        id=str(updated.id),
-        organization_id=str(updated.organization_id),
-        organization_name=org.name,
-        plan_tier=updated.plan_tier,
-        status=updated.status,
-        base_repo_limit=updated.base_repo_limit,
-        is_manually_assigned=updated.is_manually_assigned,
-        manual_assignment_note=updated.manual_assignment_note,
-        stripe_customer_id=updated.stripe_customer_id,
-        created_at=updated.created_at.isoformat(),
-    )
+        return SubscriptionResponse(
+            id=str(updated.id),
+            organization_id=str(updated.organization_id),
+            organization_name=org.name,
+            plan_tier=updated.plan_tier,
+            status=updated.status,
+            base_repo_limit=updated.base_repo_limit,
+            is_manually_assigned=updated.is_manually_assigned,
+            manual_assignment_note=updated.manual_assignment_note,
+            stripe_customer_id=updated.stripe_customer_id,
+            created_at=updated.created_at.isoformat(),
+        )
 
 
 @router.get("/plans")
