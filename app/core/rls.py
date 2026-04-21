@@ -19,6 +19,13 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Key stored on ``session.info`` so the ``after_begin`` listener (see
+# :mod:`app.core.database`) can re-issue ``SET LOCAL`` at the start of every
+# new transaction on the session. This is what makes the invariant survive
+# mid-flight ``commit()``s without each call site having to re-call
+# ``set_rls_user_context`` manually.
+RLS_INFO_KEY = "rls_user_id"
+
 
 async def set_rls_user_context(session: AsyncSession, user_id: UUID) -> None:
     """
@@ -26,7 +33,9 @@ async def set_rls_user_context(session: AsyncSession, user_id: UUID) -> None:
 
     Uses SET LOCAL to ensure the setting is transaction-scoped,
     which works correctly with connection poolers like PgBouncer.
-    The setting is automatically reset when the transaction ends.
+    The setting is automatically reset when the transaction ends —
+    the ``after_begin`` listener on :class:`sqlalchemy.orm.Session`
+    re-issues it for every subsequent transaction on this session.
 
     Args:
         session: The async database session
@@ -35,9 +44,16 @@ async def set_rls_user_context(session: AsyncSession, user_id: UUID) -> None:
     Example:
         async with async_session_maker() as session:
             await set_rls_user_context(session, current_user.id)
-            # All queries now filtered by RLS policies
+            # All queries now filtered by RLS policies — even across
+            # mid-flight commits, because the listener re-arms context
+            # at the start of every new transaction.
             products = await session.execute(select(Product))
     """
+    # Persist on sync_session.info so the auto-rehydration listener can
+    # retrieve it. The listener only attaches to the sync Session, so we
+    # write to the sync_session's info dict (it is shared with AsyncSession).
+    session.sync_session.info[RLS_INFO_KEY] = user_id
+
     # SET LOCAL doesn't support parameterized queries ($1 placeholders) in PostgreSQL.
     # This is safe because user_id is a validated UUID type (only hex chars and hyphens).
     await session.execute(text(f"SET LOCAL app.current_user_id = '{user_id}'"))
@@ -50,9 +66,13 @@ async def clear_rls_context(session: AsyncSession) -> None:
     This is optional since SET LOCAL automatically resets at transaction end,
     but can be useful for explicit cleanup in tests or when reusing sessions.
 
+    Also removes the stashed user_id from ``session.info`` so the
+    ``after_begin`` listener stops re-arming context on this session.
+
     Args:
         session: The async database session
     """
+    session.sync_session.info.pop(RLS_INFO_KEY, None)
     await session.execute(text("RESET app.current_user_id"))
 
 

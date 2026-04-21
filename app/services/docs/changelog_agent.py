@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.models.document import Document
 from app.models.product import Product
@@ -39,11 +40,18 @@ class ChangelogAgent:
         product: Product,
         created_by_user_id: uuid_pkg.UUID | None = None,
         github_service: GitHubService | None = None,
+        user_id: uuid_pkg.UUID | None = None,
     ) -> None:
         self.db = db
         self.product = product
-        # If not provided, fall back to product owner (for orchestrator usage)
+        # ``created_by_user_id`` is the *audit* user (who authored the
+        # changelog row). ``user_id`` is the *acting* user whose identity
+        # drives RLS context — they may differ (e.g. a teammate-editor
+        # maintaining docs owned by the org founder). If ``user_id`` is
+        # omitted we fall back to ``created_by_user_id`` or the product
+        # owner so non-RLS callers keep working.
         self.created_by_user_id = created_by_user_id or product.user_id
+        self.user_id = user_id or self.created_by_user_id
         self.github_service = github_service
 
     async def run(self) -> ChangelogResult:
@@ -90,6 +98,8 @@ class ChangelogAgent:
         )
         self.db.add(doc)
         await self.db.commit()
+        # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+        await set_rls_user_context(self.db, self.user_id)
         await self.db.refresh(doc)
         return doc
 
@@ -123,6 +133,8 @@ class ChangelogAgent:
         changelog.content = updated_content
         changelog.updated_at = datetime.now(UTC)
         await self.db.commit()
+        # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+        await set_rls_user_context(self.db, self.user_id)
         await self.db.refresh(changelog)
 
         return changelog

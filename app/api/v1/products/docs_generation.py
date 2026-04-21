@@ -276,6 +276,7 @@ async def reset_docs_generation(
 async def _mark_generation_failed(
     product_id: str,
     error_message: str,
+    user_id: str,
     max_retries: int = 3,
 ) -> None:
     """
@@ -286,10 +287,13 @@ async def _mark_generation_failed(
     Includes retry logic to handle transient connection failures.
     """
     from app.core.database import async_session_maker
+    from app.core.rls import set_rls_user_context
 
     for attempt in range(max_retries):
         try:
             async with async_session_maker() as db:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                await set_rls_user_context(db, uuid_pkg.UUID(user_id))
                 product_uuid = uuid_pkg.UUID(product_id)
                 # Access was already verified when the task was started
                 product = await product_ops.get(db, product_uuid)
@@ -319,7 +323,7 @@ async def _mark_generation_failed(
                 )
 
 
-async def _mark_generation_completed(product_id: str) -> None:
+async def _mark_generation_completed(product_id: str, user_id: str) -> None:
     """
     Helper to mark documentation generation as completed using a fresh DB session.
 
@@ -328,9 +332,12 @@ async def _mark_generation_completed(product_id: str) -> None:
     has been open too long. Since AI operations can take minutes, we use a fresh session.
     """
     from app.core.database import async_session_maker
+    from app.core.rls import set_rls_user_context
 
     try:
         async with async_session_maker() as db:
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(db, uuid_pkg.UUID(user_id))
             product_uuid = uuid_pkg.UUID(product_id)
             product = await product_ops.get(db, product_uuid)
             if product:
@@ -427,6 +434,7 @@ async def run_document_orchestrator(
         mode: Generation mode - "full" (regenerate all) or "additive" (only add new)
     """
     from app.core.database import async_session_maker
+    from app.core.rls import set_rls_user_context
     from app.services.docs import DocumentOrchestrator
     from app.services.docs.file_source import (
         create_github_service_factory,
@@ -437,6 +445,9 @@ async def run_document_orchestrator(
         try:
             product_uuid = uuid_pkg.UUID(product_id)
             user_uuid = uuid_pkg.UUID(user_id)
+
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(db, user_uuid)
 
             # Access was already verified when the task was started
             product = await product_ops.get(db, product_uuid)
@@ -455,6 +466,7 @@ async def run_document_orchestrator(
             orchestrator = DocumentOrchestrator(
                 db,
                 product,
+                user_uuid,
                 github_service=fallback_service,
                 github_service_factory=factory,
             )
@@ -462,7 +474,7 @@ async def run_document_orchestrator(
 
             # Update status on success using fresh session to avoid statement timeout
             # The orchestrator session has been open for the entire AI generation process
-            await _mark_generation_completed(product_id)
+            await _mark_generation_completed(product_id, user_id)
             logger.info(
                 f"Documentation generation completed for product {product_id} (mode: {mode})"
             )
@@ -470,4 +482,4 @@ async def run_document_orchestrator(
         except Exception as e:
             logger.error(f"Documentation generation failed for product {product_id}: {e}")
             # Use a fresh session for error handling to avoid stale session issues
-            await _mark_generation_failed(product_id, str(e))
+            await _mark_generation_failed(product_id, str(e), user_id)

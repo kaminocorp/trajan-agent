@@ -306,3 +306,39 @@ async def viewer_client(db_session: AsyncSession, viewer_user):
         yield client
 
     app.dependency_overrides.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Opt-in RLS-aware variants of the auth-variant clients (Phase B)
+#
+# Parallel to `rls_api_client` in the root conftest. Each wraps its bypass
+# counterpart and flips the session role to `trajan_app` with
+# `app.current_user_id` seeded to the correct user for that variant.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def rls_admin_client(admin_client, db_session: AsyncSession, admin_user):
+    """RLS-aware variant of `admin_client` — endpoint queries run under `trajan_app`."""
+    from tests.conftest import _activate_trajan_app_role
+
+    await _activate_trajan_app_role(db_session, admin_user.id)
+    yield admin_client
+
+
+@pytest.fixture
+async def rls_second_user_client(second_user_client, db_session: AsyncSession, second_user):
+    """RLS-aware variant of `second_user_client` — endpoint queries run under `trajan_app`."""
+    from tests.conftest import _activate_trajan_app_role
+
+    await _activate_trajan_app_role(db_session, second_user.id)
+    yield second_user_client
+
+
+@pytest.fixture
+async def rls_viewer_client(viewer_client, db_session: AsyncSession, viewer_user):
+    """RLS-aware variant of `viewer_client` — endpoint queries run under `trajan_app`."""
+    from tests.conftest import _activate_trajan_app_role
+
+    await _activate_trajan_app_role(db_session, viewer_user.id)
+    yield viewer_client

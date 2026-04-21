@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.models.document import Document
 from app.models.product import Product
@@ -44,10 +45,13 @@ class PlansAgent:
         db: AsyncSession,
         product: Product,
         github_service: GitHubService,
+        user_id: uuid_pkg.UUID,
     ) -> None:
         self.db = db
         self.product = product
         self.github_service = github_service
+        # Acting user — used to re-arm RLS context after commits.
+        self.user_id = user_id
 
     async def run(self) -> PlansResult:
         """
@@ -79,6 +83,9 @@ class PlansAgent:
 
         if organized_count > 0:
             await self.db.commit()
+            # Re-arm context — ``self.db`` is shared with the orchestrator
+            # and may have further work queued after this agent returns.
+            await set_rls_user_context(self.db, self.user_id)
 
         return PlansResult(organized_count=organized_count)
 
@@ -170,6 +177,8 @@ class PlansAgent:
         )
         self.db.add(doc)
         await self.db.commit()
+        # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+        await set_rls_user_context(self.db, self.user_id)
         await self.db.refresh(doc)
 
         logger.info(f"Created plan: {title}")
