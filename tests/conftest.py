@@ -223,6 +223,65 @@ async def api_client(db_session: AsyncSession, test_user):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Opt-in RLS-aware client fixtures (Phase B of the write-policy sweep)
+#
+# The default `api_client` above — and its siblings in tests/api/conftest.py —
+# hold a `db_session` that connects as `postgres` (rolbypassrls=true). RLS is
+# silently bypassed, which is why every v0.31.x re-arm bug shipped to prod
+# before detection.
+#
+# The opt-in `rls_*_client` variants below wrap the defaults and flip the
+# session's role to `trajan_app` (NOBYPASSRLS + FORCE RLS) with
+# `app.current_user_id` seeded to the appropriate user. Tests that want to
+# exercise RLS policies end-to-end request `rls_api_client` instead of
+# `api_client`. The existing 275+ passing tests stay on bypass and continue
+# to pass unmodified.
+#
+# Seed data before the fixture yields (test_user, test_org, etc. are already
+# created under postgres), then the SET LOCAL ROLE only affects subsequent
+# queries — which are the ones driven by endpoint code paths.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _activate_trajan_app_role(db_session: AsyncSession, user_id) -> None:
+    """Switch the test db_session to `trajan_app` with app.current_user_id seeded.
+
+    `SET LOCAL ROLE` is transaction-scoped, so the outer-transaction rollback
+    in `db_session` reverts it without further cleanup. Writes to
+    `session.info[RLS_INFO_KEY]` let the v0.31.3 `after_begin` listener
+    re-arm `app.current_user_id` on every savepoint inside the endpoint,
+    which matches how production behaves.
+
+    Skips the test (rather than failing) if `trajan_app` doesn't exist on
+    this DB — local dev DBs without the role get a clear skip message
+    instead of a crash at fixture setup.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError, ProgrammingError
+
+    from app.core.rls import RLS_INFO_KEY
+
+    db_session.info[RLS_INFO_KEY] = user_id
+    await db_session.execute(text(f"SET LOCAL app.current_user_id = '{user_id}'"))
+    try:
+        await db_session.execute(text("SET LOCAL ROLE trajan_app"))
+    except (ProgrammingError, DBAPIError) as exc:
+        pytest.skip(f"Cannot SET LOCAL ROLE trajan_app ({exc}); role missing or ungranted.")
+
+
+@pytest.fixture
+async def rls_api_client(api_client, db_session: AsyncSession, test_user):
+    """RLS-aware variant of `api_client` — endpoint queries run under `trajan_app`.
+
+    Use this for regression tests that must verify a policy admits (or
+    rejects) a given write. The default `api_client` stays on BYPASSRLS so
+    every existing test continues to pass without modification.
+    """
+    await _activate_trajan_app_role(db_session, test_user.id)
+    yield api_client
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # External Service Mocks (autouse for unit/DB tests, skipped for full_stack)
 # ─────────────────────────────────────────────────────────────────────────────
 

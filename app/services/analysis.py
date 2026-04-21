@@ -11,6 +11,7 @@ import logging
 import uuid as uuid_pkg
 
 from app.core.database import async_session_maker
+from app.core.rls import set_rls_user_context
 from app.models.product import Product
 from app.schemas.product_overview import ProductOverview
 from app.services.analysis_orchestrator import AnalysisOrchestrator
@@ -44,9 +45,14 @@ async def run_analysis_task(
     """
     logger.info(f"Background analysis task started for product {product_id}")
 
+    user_uuid = uuid_pkg.UUID(user_id)
+
     async with async_session_maker() as session:
         product = None
         try:
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(session, user_uuid)
+
             # Get the product
             product = await session.get(Product, uuid_pkg.UUID(product_id))
             if not product:
@@ -54,7 +60,6 @@ async def run_analysis_task(
                 return
 
             # Create per-repo token resolution factory (per-repo token > App > PAT)
-            user_uuid = uuid_pkg.UUID(user_id)
             factory = await create_github_service_factory(session, user_uuid)
 
             # Get fallback service for non-repo-specific API calls
@@ -62,25 +67,33 @@ async def run_analysis_task(
 
             # Run orchestrated analysis with per-repo token resolution
             orchestrator = AnalysisOrchestrator(
-                session, product, github_service_factory=factory, github_service=fallback_service
+                session,
+                product,
+                user_uuid,
+                github_service_factory=factory,
+                github_service=fallback_service,
             )
             overview = await orchestrator.analyze_product()
 
             # Update product with results using fresh session to avoid statement timeout.
             # The session has been open for the entire AI analysis process.
-            await _mark_analysis_completed(product_id, overview)
+            await _mark_analysis_completed(product_id, overview, user_id)
             logger.info(f"Analysis completed successfully for product {product_id}")
 
         except Exception as e:
             logger.exception(f"Analysis failed for product {product_id}: {e}")
-            await _mark_analysis_failed(product_id, str(e))
+            await _mark_analysis_failed(product_id, str(e), user_id)
             raise
 
 
-async def _mark_analysis_completed(product_id: str, overview: ProductOverview) -> None:
+async def _mark_analysis_completed(
+    product_id: str, overview: ProductOverview, user_id: str
+) -> None:
     """Mark analysis as completed using a fresh session to avoid statement timeout."""
     try:
         async with async_session_maker() as session:
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(session, uuid_pkg.UUID(user_id))
             product = await session.get(Product, uuid_pkg.UUID(product_id))
             if product:
                 product.product_overview = overview.model_dump(mode="json")
@@ -92,10 +105,12 @@ async def _mark_analysis_completed(product_id: str, overview: ProductOverview) -
         logger.error(f"Failed to mark analysis as completed for product {product_id}: {e}")
 
 
-async def _mark_analysis_failed(product_id: str, error_message: str) -> None:
+async def _mark_analysis_failed(product_id: str, error_message: str, user_id: str) -> None:
     """Mark analysis as failed using a fresh session to avoid statement timeout."""
     try:
         async with async_session_maker() as session:
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(session, uuid_pkg.UUID(user_id))
             product = await session.get(Product, uuid_pkg.UUID(product_id))
             if product:
                 product.analysis_status = "failed"

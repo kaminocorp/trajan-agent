@@ -466,6 +466,7 @@ Use the save_changelog_entries tool to return your grouped entries."""
     async def _persist_progress(self, progress: GenerationProgress) -> None:
         """Write progress to product.changelog_generation_progress via fresh session."""
         from app.core.database import async_session_maker
+        from app.core.rls import set_rls_user_context
 
         progress_data = {
             "stage": progress.stage,
@@ -479,6 +480,8 @@ Use the save_changelog_entries tool to return your grouped entries."""
 
         try:
             async with async_session_maker() as session:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                await set_rls_user_context(session, self.user_id)
                 product = await session.get(Product, self.product.id)
                 if product:
                     # Reuse docs_generation_progress field with a changelog namespace
