@@ -2,6 +2,7 @@
 GitHub integration endpoints for listing and importing repositories.
 """
 
+import asyncio
 import logging
 import re
 import uuid as uuid_pkg
@@ -83,6 +84,7 @@ class GitHubRepoPreview(BaseModel):
     updated_at: str
     already_imported: bool
     imported_to_product_id: str | None
+    source_account: str | None = None
 
 
 class GitHubReposListResponse(BaseModel):
@@ -230,10 +232,10 @@ async def list_github_repos(
     marks repos as 'already_imported' only if they exist in THAT specific product.
     Without product_id, checks globally across all accessible products.
 
-    When organization_id is provided, attempts to use the org's GitHub App
-    installation token first, falling back to the user's PAT.
+    When organization_id is provided, aggregates repos from ALL GitHub App
+    installations for the org (multiple GitHub accounts), falling back to
+    the user's PAT when no App installations are available.
     """
-    token_method = "pat"
     if organization_id:
         # Verify caller is a member of the target organization
         member = await org_member_ops.get_by_org_and_user(db, organization_id, current_user.id)
@@ -244,8 +246,8 @@ async def list_github_repos(
             )
 
         resolver = TokenResolver(db)
-        token, token_method = await resolver.resolve_token_for_org(organization_id, current_user.id)
-        if not token:
+        token_entries = await resolver.resolve_all_tokens_for_org(organization_id, current_user.id)
+        if not token_entries:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No GitHub access configured. Install the GitHub App "
@@ -253,61 +255,92 @@ async def list_github_repos(
             )
     else:
         token = await get_github_token(db, current_user.id)
-    github = GitHubService(token)
+        token_entries = [(token, "pat", "")]
 
-    try:
-        if token_method == "github_app":
-            # App installation tokens cannot access /user/repos — use
-            # the installation-scoped endpoint instead.
-            result = await github.get_installation_repos(
-                page=page,
-                per_page=per_page,
-            )
-        else:
-            result = await github.get_user_repos(
-                page=page,
-                per_page=per_page,
-                sort=sort,
-                visibility=visibility,
-            )
-    except GitHubAPIError as e:
-        detail = e.message
-        if e.rate_limit_reset:
-            import time
+    # Fetch repos from each token source concurrently
+    async def _fetch_repos(
+        tkn: str, method: str, account: str
+    ) -> tuple[list[GitHubRepoPreview], bool, int | None]:
+        """Fetch repos for a single token and annotate with source_account."""
+        github = GitHubService(tkn)
+        try:
+            if method == "github_app":
+                result = await github.get_installation_repos(page=page, per_page=per_page)
+            else:
+                result = await github.get_user_repos(
+                    page=page, per_page=per_page, sort=sort, visibility=visibility
+                )
+        except GitHubAPIError as e:
+            detail = e.message
+            if e.rate_limit_reset:
+                import time
 
-            reset_in = max(0, e.rate_limit_reset - int(time.time()))
-            minutes = reset_in // 60
-            detail = f"{e.message}. Rate limit resets in {minutes} minutes."
-        raise HTTPException(
-            status_code=e.status_code or status.HTTP_502_BAD_GATEWAY,
-            detail=detail,
-        ) from None
+                reset_in = max(0, e.rate_limit_reset - int(time.time()))
+                minutes = reset_in // 60
+                detail = f"{e.message}. Rate limit resets in {minutes} minutes."
+            if len(token_entries) == 1:
+                # Only one source — surface the error directly
+                raise HTTPException(
+                    status_code=e.status_code or status.HTTP_502_BAD_GATEWAY,
+                    detail=detail,
+                ) from None
+            # Multiple sources — log and skip this one
+            logger.warning("GitHub repo fetch failed for account %s: %s", account, detail)
+            return [], False, None
 
-    # Check which repos are already imported
-    # When product_id is provided, check only that specific product (fixes cross-project import bug)
-    # When product_id is not provided, check globally across all accessible products
-    repos_with_status: list[GitHubRepoPreview] = []
-    for repo in result.repos:
-        if product_id:
-            # Product-specific check: only mark as imported if in THIS product
-            existing = await repository_ops.get_by_github_id(db, product_id, repo.github_id)
-        else:
-            # Global check: mark as imported if in ANY accessible product
-            existing = await repository_ops.find_by_github_id(db, repo.github_id)
-        repos_with_status.append(
-            GitHubRepoPreview(
-                **asdict(repo),
-                already_imported=existing is not None,
-                imported_to_product_id=str(existing.product_id) if existing else None,
+        previews: list[GitHubRepoPreview] = []
+        for repo in result.repos:
+            if product_id:
+                existing = await repository_ops.get_by_github_id(db, product_id, repo.github_id)
+            else:
+                existing = await repository_ops.find_by_github_id(db, repo.github_id)
+            previews.append(
+                GitHubRepoPreview(
+                    **asdict(repo),
+                    already_imported=existing is not None,
+                    imported_to_product_id=(str(existing.product_id) if existing else None),
+                    source_account=account or None,
+                )
             )
+        return previews, result.has_more, result.rate_limit_remaining
+
+    all_repos: list[GitHubRepoPreview] = []
+    has_more = False
+    rate_limit: int | None = None
+
+    if len(token_entries) == 1:
+        # Single source — no concurrency overhead
+        tkn, method, account = token_entries[0]
+        all_repos, has_more, rate_limit = await _fetch_repos(tkn, method, account)
+    else:
+        # Multiple installations — fetch concurrently, then merge
+        results = await asyncio.gather(
+            *[_fetch_repos(tkn, method, acct) for tkn, method, acct in token_entries]
         )
 
+        seen_ids: set[int] = set()
+
+        for repos, src_has_more, src_rate_limit in results:
+            for repo in repos:
+                if repo.github_id not in seen_ids:
+                    seen_ids.add(repo.github_id)
+                    all_repos.append(repo)
+            if src_has_more:
+                has_more = True
+            if src_rate_limit is not None:
+                rate_limit = (
+                    min(rate_limit, src_rate_limit) if rate_limit is not None else src_rate_limit
+                )
+
+        # Sort merged results by updated_at descending for a consistent order
+        all_repos.sort(key=lambda r: r.updated_at, reverse=True)
+
     return GitHubReposListResponse(
-        repos=repos_with_status,
+        repos=all_repos,
         page=page,
         per_page=per_page,
-        has_more=result.has_more,
-        rate_limit_remaining=result.rate_limit_remaining,
+        has_more=has_more,
+        rate_limit_remaining=rate_limit,
     )
 
 
@@ -480,7 +513,7 @@ async def import_github_repos(
         if final_count > sub_ctx.plan.base_repo_limit:
             stripe_service.report_repo_usage(sub_ctx.subscription, final_count)
             overage_count = final_count - sub_ctx.plan.base_repo_limit
-            await subscription_ops.log_event(
+            await subscription_ops.log_user_event(
                 db,
                 organization_id=sub_ctx.organization.id,
                 event_type=BillingEventType.OVERAGE_BILLED,
@@ -491,6 +524,7 @@ async def import_github_repos(
                     "imported_count": len(imported),
                 },
                 description=f"Bulk import: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+                actor_user_id=current_user.id,
             )
 
     # Auto-trigger docs generation if repos were actually imported
@@ -890,7 +924,7 @@ async def link_github_repo(
         if new_count > sub_ctx.plan.base_repo_limit:
             stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
             overage_count = new_count - sub_ctx.plan.base_repo_limit
-            await subscription_ops.log_event(
+            await subscription_ops.log_user_event(
                 db,
                 organization_id=sub_ctx.organization.id,
                 event_type=BillingEventType.OVERAGE_BILLED,
@@ -900,6 +934,7 @@ async def link_github_repo(
                     "overage_count": overage_count,
                 },
                 description=f"Link-repo: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+                actor_user_id=current_user.id,
             )
 
     # Auto-trigger docs + analysis

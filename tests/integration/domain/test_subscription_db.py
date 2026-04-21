@@ -167,18 +167,17 @@ class TestBillingEvents:
         assert latest.new_value["plan_tier"] == "pro"
         assert latest.new_value["note"] == "Audit trail test"
 
-    async def test_event_round_trip(
+    async def test_user_event_round_trip(
         self, db_session: AsyncSession, test_user, test_org, test_subscription
     ):
-        """Can log a custom event and retrieve it."""
-        await subscription_ops.log_event(
+        """Can log a user-attributed event and retrieve it (actor stamped, no stripe_event_id)."""
+        await subscription_ops.log_user_event(
             db_session,
             organization_id=test_org.id,
             event_type=BillingEventType.PAYMENT_SUCCEEDED,
+            actor_user_id=test_user.id,
             new_value={"amount_cents": 4900},
             description="Monthly payment",
-            actor_user_id=test_user.id,
-            stripe_event_id="evt_test_123",
         )
 
         events = await subscription_ops.get_events(db_session, test_org.id)
@@ -190,4 +189,33 @@ class TestBillingEvents:
         evt = payment_events[0]
         assert evt.new_value["amount_cents"] == 4900
         assert evt.description == "Monthly payment"
-        assert evt.stripe_event_id == "evt_test_123"
+        assert evt.actor_user_id == test_user.id
+        assert evt.stripe_event_id is None
+
+    async def test_system_event_round_trip(
+        self, db_session: AsyncSession, test_org, test_subscription
+    ):
+        """Can log a system-attributed event and retrieve it (stripe_event_id stamped, no actor)."""
+        await subscription_ops.log_system_event(
+            db_session,
+            organization_id=test_org.id,
+            event_type=BillingEventType.PAYMENT_SUCCEEDED,
+            stripe_event_id="evt_test_system_123",
+            new_value={"amount_cents": 4900},
+            description="Webhook payment",
+        )
+
+        events = await subscription_ops.get_events(db_session, test_org.id)
+        webhook_events = [
+            e
+            for e in events
+            if e.event_type == BillingEventType.PAYMENT_SUCCEEDED.value
+            and e.stripe_event_id == "evt_test_system_123"
+        ]
+        assert len(webhook_events) == 1
+
+        evt = webhook_events[0]
+        assert evt.new_value["amount_cents"] == 4900
+        assert evt.description == "Webhook payment"
+        assert evt.actor_user_id is None
+        assert evt.stripe_event_id == "evt_test_system_123"

@@ -182,7 +182,7 @@ async def create_repository(
         if new_count > sub_ctx.plan.base_repo_limit:
             stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
             overage_count = new_count - sub_ctx.plan.base_repo_limit
-            await subscription_ops.log_event(
+            await subscription_ops.log_user_event(
                 db,
                 organization_id=sub_ctx.organization.id,
                 event_type=BillingEventType.OVERAGE_BILLED,
@@ -192,6 +192,7 @@ async def create_repository(
                     "overage_count": overage_count,
                 },
                 description=f"Repo created: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+                actor_user_id=current_user.id,
             )
 
     # Auto-trigger docs generation if user preference is enabled
@@ -296,7 +297,7 @@ async def delete_repository(
         if new_count >= sub_ctx.plan.base_repo_limit:
             stripe_service.report_repo_usage(sub_ctx.subscription, new_count)
             overage_count = new_count - sub_ctx.plan.base_repo_limit
-            await subscription_ops.log_event(
+            await subscription_ops.log_user_event(
                 db,
                 organization_id=sub_ctx.organization.id,
                 event_type=BillingEventType.OVERAGE_BILLED,
@@ -306,4 +307,5 @@ async def delete_repository(
                     "overage_count": overage_count,
                 },
                 description=f"Repo deleted: {overage_count} repo(s) over {sub_ctx.plan.base_repo_limit} base limit",
+                actor_user_id=current_user.id,
             )
