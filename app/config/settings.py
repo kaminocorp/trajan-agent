@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:6543/postgres"
     # Database - direct connection for migrations (port 5432)
     database_url_direct: str = "postgresql+asyncpg://postgres:password@localhost:5432/postgres"
+    # Database - transaction pooled connection for cron + webhook bootstrap
+    # (port 6543, connects as BYPASSRLS role `trajan_cron`). Used only by
+    # services/scheduler.py, webhook handlers, and API-key auth dependencies
+    # to run narrow lookups that have no tenant user identity at entry.
+    # See docs/executing/cron-role-and-bypass-then-scope.md.
+    database_url_cron: str = "postgresql+asyncpg://trajan_cron:password@localhost:6543/postgres"
 
     # Supabase
     supabase_url: str = ""

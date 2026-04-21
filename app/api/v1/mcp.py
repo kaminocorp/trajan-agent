@@ -3,6 +3,12 @@
 These endpoints provide the same data as the authenticated endpoints but use
 API key auth (Bearer trj_pk_xxx) instead of JWT, scoped to the key's product.
 This allows the standalone trajan-mcp server to access product data.
+
+Bypass-then-scope (Phase 3d of cron-role plan): every endpoint opens its own
+``async_session_maker`` session and calls ``set_rls_user_context`` with
+``api_key.created_by_user_id`` (NOT NULL on ``ProductApiKey``) before any
+RLS-protected read or write. ``get_api_key`` already validated the key under
+BYPASSRLS in the auth dependency.
 """
 
 import logging
@@ -13,11 +19,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.api_key_auth import require_scope
-from app.core.database import get_db
+from app.core.database import async_session_maker
 from app.core.rate_limit import RateLimitConfig, rate_limiter
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.domain.repository_operations import repository_ops
 from app.domain.work_item_operations import work_item_ops
@@ -251,67 +257,67 @@ class MCPSyncDocsResponse(BaseModel):
 @router.get("/product", response_model=MCPProductResponse)
 async def get_product(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPProductResponse:
     """Get product overview for the API key's product."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    product = await db.get(Product, api_key.product_id)
-    if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    # Count related entities
-    doc_count = (
-        await db.execute(
-            select(func.count())
-            .select_from(Document)
-            .where(Document.product_id == api_key.product_id)  # type: ignore[arg-type]
-        )
-    ).scalar_one()
+        product = await db.get(Product, api_key.product_id)
+        if not product:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
 
-    work_item_count = (
-        await db.execute(
-            select(func.count())
-            .select_from(WorkItem)
-            .where(
-                WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
-                WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
+        doc_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(Document)
+                .where(Document.product_id == api_key.product_id)  # type: ignore[arg-type]
             )
+        ).scalar_one()
+
+        work_item_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(WorkItem)
+                .where(
+                    WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
+                    WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
+                )
+            )
+        ).scalar_one()
+
+        repos_result = await db.execute(
+            select(Repository).where(Repository.product_id == api_key.product_id)  # type: ignore[arg-type]
         )
-    ).scalar_one()
+        repos = repos_result.scalars().all()
 
-    repos_result = await db.execute(
-        select(Repository).where(Repository.product_id == api_key.product_id)  # type: ignore[arg-type]
-    )
-    repos = repos_result.scalars().all()
-
-    return MCPProductResponse(
-        id=product.id,
-        name=product.name,
-        description=product.description,
-        analysis_status=product.analysis_status,
-        product_overview=product.product_overview,
-        doc_count=doc_count,
-        work_item_count=work_item_count,
-        repository_count=len(repos),
-        repositories=[
-            {
-                "id": str(r.id),
-                "name": r.name,
-                "full_name": r.full_name,
-                "language": r.language,
-                "url": r.url,
-                "default_branch": r.default_branch,
-            }
-            for r in repos
-        ],
-    )
+        return MCPProductResponse(
+            id=product.id,
+            name=product.name,
+            description=product.description,
+            analysis_status=product.analysis_status,
+            product_overview=product.product_overview,
+            doc_count=doc_count,
+            work_item_count=work_item_count,
+            repository_count=len(repos),
+            repositories=[
+                {
+                    "id": str(r.id),
+                    "name": r.name,
+                    "full_name": r.full_name,
+                    "language": r.language,
+                    "url": r.url,
+                    "default_branch": r.default_branch,
+                }
+                for r in repos
+            ],
+        )
 
 
 @router.get("/documents", response_model=MCPDocumentListResponse)
 async def list_documents(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
     type: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -323,42 +329,44 @@ async def list_documents(
     if type:
         base_where.append(Document.type == type)
 
-    total = (
-        await db.execute(select(func.count()).select_from(Document).where(*base_where))  # type: ignore[arg-type]
-    ).scalar_one()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    result = await db.execute(
-        select(Document)
-        .where(*base_where)  # type: ignore[arg-type]
-        .order_by(Document.updated_at.desc())  # type: ignore[attr-defined]
-        .limit(limit)
-        .offset(offset)
-    )
-    docs = result.scalars().all()
+        total = (
+            await db.execute(select(func.count()).select_from(Document).where(*base_where))  # type: ignore[arg-type]
+        ).scalar_one()
 
-    return MCPDocumentListResponse(
-        items=[
-            MCPDocumentListItem(
-                id=d.id,
-                title=d.title,
-                type=d.type,
-                folder=d.folder,
-                section=d.section,
-                subsection=d.subsection,
-                is_generated=d.is_generated,
-                updated_at=d.updated_at,
-            )
-            for d in docs
-        ],
-        total=total,
-    )
+        result = await db.execute(
+            select(Document)
+            .where(*base_where)  # type: ignore[arg-type]
+            .order_by(Document.updated_at.desc())  # type: ignore[attr-defined]
+            .limit(limit)
+            .offset(offset)
+        )
+        docs = result.scalars().all()
+
+        return MCPDocumentListResponse(
+            items=[
+                MCPDocumentListItem(
+                    id=d.id,
+                    title=d.title,
+                    type=d.type,
+                    folder=d.folder,
+                    section=d.section,
+                    subsection=d.subsection,
+                    is_generated=d.is_generated,
+                    updated_at=d.updated_at,
+                )
+                for d in docs
+            ],
+            total=total,
+        )
 
 
 @router.get("/documents/search", response_model=MCPSearchResponse)
 async def search_documents(
     q: str = Query(..., min_length=1, max_length=500),
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
     type: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
 ) -> MCPSearchResponse:
@@ -377,84 +385,87 @@ async def search_documents(
     if type:
         base_where.append(Document.type == type)
 
-    total = (
-        await db.execute(select(func.count()).select_from(Document).where(*base_where))
-    ).scalar_one()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    result = await db.execute(select(Document).where(*base_where).limit(limit))
-    docs = result.scalars().all()
+        total = (
+            await db.execute(select(func.count()).select_from(Document).where(*base_where))
+        ).scalar_one()
 
-    results = []
-    for doc in docs:
-        # Extract a snippet around the match
-        snippet = None
-        if doc.content:
-            lower_content = doc.content.lower()
-            idx = lower_content.find(q.lower())
-            if idx >= 0:
-                start = max(0, idx - 80)
-                end = min(len(doc.content), idx + len(q) + 80)
-                snippet = (
-                    ("..." if start > 0 else "")
-                    + doc.content[start:end]
-                    + ("..." if end < len(doc.content) else "")
+        result = await db.execute(select(Document).where(*base_where).limit(limit))
+        docs = result.scalars().all()
+
+        results = []
+        for doc in docs:
+            snippet = None
+            if doc.content:
+                lower_content = doc.content.lower()
+                idx = lower_content.find(q.lower())
+                if idx >= 0:
+                    start = max(0, idx - 80)
+                    end = min(len(doc.content), idx + len(q) + 80)
+                    snippet = (
+                        ("..." if start > 0 else "")
+                        + doc.content[start:end]
+                        + ("..." if end < len(doc.content) else "")
+                    )
+                else:
+                    snippet = doc.content[:200] + ("..." if len(doc.content) > 200 else "")
+
+            results.append(
+                MCPSearchResult(
+                    id=doc.id,
+                    title=doc.title,
+                    snippet=snippet,
+                    type=doc.type,
+                    folder=doc.folder,
                 )
-            else:
-                snippet = doc.content[:200] + ("..." if len(doc.content) > 200 else "")
-
-        results.append(
-            MCPSearchResult(
-                id=doc.id,
-                title=doc.title,
-                snippet=snippet,
-                type=doc.type,
-                folder=doc.folder,
             )
-        )
 
-    return MCPSearchResponse(results=results, total=total)
+        return MCPSearchResponse(results=results, total=total)
 
 
 @router.get("/documents/{document_id}", response_model=MCPDocumentResponse)
 async def get_document(
     document_id: uuid_pkg.UUID,
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPDocumentResponse:
     """Get a single document with full content."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    result = await db.execute(
-        select(Document).where(
-            Document.id == document_id,  # type: ignore[arg-type]
-            Document.product_id == api_key.product_id,  # type: ignore[arg-type]
-        )
-    )
-    doc = result.scalar_one_or_none()
-    if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPDocumentResponse(
-        id=doc.id,
-        title=doc.title,
-        content=doc.content,
-        type=doc.type,
-        folder=doc.folder,
-        section=doc.section,
-        subsection=doc.subsection,
-        is_generated=doc.is_generated,
-        is_pinned=doc.is_pinned,
-        github_path=doc.github_path,
-        sync_status=doc.sync_status,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
-    )
+        result = await db.execute(
+            select(Document).where(
+                Document.id == document_id,  # type: ignore[arg-type]
+                Document.product_id == api_key.product_id,  # type: ignore[arg-type]
+            )
+        )
+        doc = result.scalar_one_or_none()
+        if not doc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+        return MCPDocumentResponse(
+            id=doc.id,
+            title=doc.title,
+            content=doc.content,
+            type=doc.type,
+            folder=doc.folder,
+            section=doc.section,
+            subsection=doc.subsection,
+            is_generated=doc.is_generated,
+            is_pinned=doc.is_pinned,
+            github_path=doc.github_path,
+            sync_status=doc.sync_status,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
+        )
 
 
 @router.get("/work-items", response_model=MCPWorkItemListResponse)
 async def list_work_items(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
     status_filter: str | None = Query(None, alias="status"),
     type: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
@@ -472,70 +483,75 @@ async def list_work_items(
     if type:
         base_where.append(WorkItem.type == type)
 
-    total = (
-        await db.execute(select(func.count()).select_from(WorkItem).where(*base_where))
-    ).scalar_one()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    result = await db.execute(
-        select(WorkItem)
-        .where(*base_where)
-        .order_by(WorkItem.updated_at.desc())  # type: ignore[attr-defined]
-        .limit(limit)
-        .offset(offset)
-    )
-    items = result.scalars().all()
+        total = (
+            await db.execute(select(func.count()).select_from(WorkItem).where(*base_where))
+        ).scalar_one()
 
-    return MCPWorkItemListResponse(
-        items=[
-            MCPWorkItemListItem(
-                id=i.id,
-                title=i.title,
-                type=i.type,
-                status=i.status,
-                priority=i.priority,
-                tags=i.tags,
-                updated_at=i.updated_at,
-            )
-            for i in items
-        ],
-        total=total,
-    )
+        result = await db.execute(
+            select(WorkItem)
+            .where(*base_where)
+            .order_by(WorkItem.updated_at.desc())  # type: ignore[attr-defined]
+            .limit(limit)
+            .offset(offset)
+        )
+        items = result.scalars().all()
+
+        return MCPWorkItemListResponse(
+            items=[
+                MCPWorkItemListItem(
+                    id=i.id,
+                    title=i.title,
+                    type=i.type,
+                    status=i.status,
+                    priority=i.priority,
+                    tags=i.tags,
+                    updated_at=i.updated_at,
+                )
+                for i in items
+            ],
+            total=total,
+        )
 
 
 @router.get("/work-items/{work_item_id}", response_model=MCPWorkItemResponse)
 async def get_work_item(
     work_item_id: uuid_pkg.UUID,
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPWorkItemResponse:
     """Get a single work item with full detail."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    result = await db.execute(
-        select(WorkItem).where(
-            WorkItem.id == work_item_id,  # type: ignore[arg-type]
-            WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
-            WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
-        )
-    )
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work item not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPWorkItemResponse(
-        id=item.id,
-        title=item.title,
-        description=item.description,
-        type=item.type,
-        status=item.status,
-        priority=item.priority,
-        tags=item.tags,
-        source=item.source,
-        reporter_email=item.reporter_email,
-        reporter_name=item.reporter_name,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
-    )
+        result = await db.execute(
+            select(WorkItem).where(
+                WorkItem.id == work_item_id,  # type: ignore[arg-type]
+                WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
+                WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
+            )
+        )
+        item = result.scalar_one_or_none()
+        if not item:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work item not found")
+
+        return MCPWorkItemResponse(
+            id=item.id,
+            title=item.title,
+            description=item.description,
+            type=item.type,
+            status=item.status,
+            priority=item.priority,
+            tags=item.tags,
+            source=item.source,
+            reporter_email=item.reporter_email,
+            reporter_name=item.reporter_name,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -546,76 +562,83 @@ async def get_work_item(
 @router.get("/repositories", response_model=MCPRepositoryListResponse)
 async def list_repositories(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPRepositoryListResponse:
     """List repositories linked to the product."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    result = await db.execute(
-        select(Repository).where(
-            Repository.product_id == api_key.product_id  # type: ignore[arg-type]
-        )
-    )
-    repos = result.scalars().all()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPRepositoryListResponse(
-        items=[
-            MCPRepositoryListItem(
-                id=r.id,
-                name=r.name,
-                full_name=r.full_name,
-                language=r.language,
-                url=r.url,
-                default_branch=r.default_branch,
+        result = await db.execute(
+            select(Repository).where(
+                Repository.product_id == api_key.product_id  # type: ignore[arg-type]
             )
-            for r in repos
-        ],
-        total=len(repos),
-    )
+        )
+        repos = result.scalars().all()
+
+        return MCPRepositoryListResponse(
+            items=[
+                MCPRepositoryListItem(
+                    id=r.id,
+                    name=r.name,
+                    full_name=r.full_name,
+                    language=r.language,
+                    url=r.url,
+                    default_branch=r.default_branch,
+                )
+                for r in repos
+            ],
+            total=len(repos),
+        )
 
 
 @router.get("/repositories/{repository_id}/tree", response_model=MCPRepoTreeResponse)
 async def get_repository_tree(
     repository_id: uuid_pkg.UUID,
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
     branch: str | None = Query(None, description="Branch name (defaults to repo default branch)"),
 ) -> MCPRepoTreeResponse:
     """Get the file tree of a linked repository via GitHub API."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    result = await db.execute(
-        select(Repository).where(
-            Repository.id == repository_id,  # type: ignore[arg-type]
-            Repository.product_id == api_key.product_id,  # type: ignore[arg-type]
-        )
-    )
-    repo = result.scalar_one_or_none()
-    if not repo:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    if not repo.full_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Repository has no linked GitHub full_name",
+        result = await db.execute(
+            select(Repository).where(
+                Repository.id == repository_id,  # type: ignore[arg-type]
+                Repository.product_id == api_key.product_id,  # type: ignore[arg-type]
+            )
         )
+        repo = result.scalar_one_or_none()
+        if not repo:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
-    resolver = TokenResolver(db)
-    token, method = await resolver.resolve_token(repo, api_key.created_by_user_id)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No GitHub token available for this repository",
-        )
+        if not repo.full_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Repository has no linked GitHub full_name",
+            )
 
-    owner, repo_name = repo.full_name.split("/", 1)
-    target_branch = branch or repo.default_branch or "main"
+        resolver = TokenResolver(db)
+        token, _method = await resolver.resolve_token(repo, api_key.created_by_user_id)
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No GitHub token available for this repository",
+            )
+
+        owner, repo_name = repo.full_name.split("/", 1)
+        target_branch = branch or repo.default_branch or "main"
+        repo_id = repo.id
+        repo_full_name = repo.full_name
+        repo_display_name = repo.name
 
     try:
         gh = GitHubReadOperations(token=token)
         tree = await gh.get_repo_tree(owner=owner, repo=repo_name, branch=target_branch)
     except Exception as e:
-        logger.error(f"GitHub tree fetch failed for {repo.full_name}: {e}")
+        logger.error(f"GitHub tree fetch failed for {repo_full_name}: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch repository tree from GitHub: {e}",
@@ -629,8 +652,8 @@ async def get_repository_tree(
     ]
 
     return MCPRepoTreeResponse(
-        repository_id=repo.id,
-        repository_name=repo.name,
+        repository_id=repo_id,
+        repository_name=repo_display_name,
         branch=target_branch,
         files=items,
         truncated=tree.truncated,
@@ -642,38 +665,42 @@ async def get_repository_file(
     repository_id: uuid_pkg.UUID,
     path: str = Query(..., min_length=1, max_length=500, description="File path in the repository"),
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
     branch: str | None = Query(None, description="Branch name (defaults to repo default branch)"),
 ) -> MCPRepoFileResponse:
     """Get the content of a single file from a linked repository via GitHub API."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    result = await db.execute(
-        select(Repository).where(
-            Repository.id == repository_id,  # type: ignore[arg-type]
-            Repository.product_id == api_key.product_id,  # type: ignore[arg-type]
-        )
-    )
-    repo = result.scalar_one_or_none()
-    if not repo:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    if not repo.full_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Repository has no linked GitHub full_name",
+        result = await db.execute(
+            select(Repository).where(
+                Repository.id == repository_id,  # type: ignore[arg-type]
+                Repository.product_id == api_key.product_id,  # type: ignore[arg-type]
+            )
         )
+        repo = result.scalar_one_or_none()
+        if not repo:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
-    resolver = TokenResolver(db)
-    token, method = await resolver.resolve_token(repo, api_key.created_by_user_id)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No GitHub token available for this repository",
-        )
+        if not repo.full_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Repository has no linked GitHub full_name",
+            )
 
-    owner, repo_name = repo.full_name.split("/", 1)
-    target_branch = branch or repo.default_branch or "main"
+        resolver = TokenResolver(db)
+        token, _method = await resolver.resolve_token(repo, api_key.created_by_user_id)
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No GitHub token available for this repository",
+            )
+
+        owner, repo_name = repo.full_name.split("/", 1)
+        target_branch = branch or repo.default_branch or "main"
+        repo_id = repo.id
+        repo_full_name = repo.full_name
 
     try:
         gh = GitHubReadOperations(token=token)
@@ -681,7 +708,7 @@ async def get_repository_file(
             owner=owner, repo=repo_name, path=path, branch=target_branch
         )
     except Exception as e:
-        logger.error(f"GitHub file fetch failed for {repo.full_name}:{path}: {e}")
+        logger.error(f"GitHub file fetch failed for {repo_full_name}:{path}: {e}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch file from GitHub: {e}",
@@ -694,7 +721,7 @@ async def get_repository_file(
         )
 
     return MCPRepoFileResponse(
-        repository_id=repo.id,
+        repository_id=repo_id,
         path=file.path,
         content=file.content,
         size=file.size,
@@ -715,41 +742,44 @@ async def get_repository_file(
 async def create_document(
     data: MCPDocumentCreate,
     api_key: ProductApiKey = Depends(require_scope("mcp:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPDocumentResponse:
     """Create a new document in the product."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_write", MCP_WRITE_LIMIT)
 
-    doc = await document_ops.create(
-        db,
-        obj_in={
-            "product_id": api_key.product_id,
-            "title": data.title,
-            "content": data.content,
-            "type": data.type,
-            "folder": data.folder,
-            "section": data.section,
-            "subsection": data.subsection,
-            "is_generated": False,
-        },
-        created_by_user_id=api_key.created_by_user_id,
-    )
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPDocumentResponse(
-        id=doc.id,
-        title=doc.title,
-        content=doc.content,
-        type=doc.type,
-        folder=doc.folder,
-        section=doc.section,
-        subsection=doc.subsection,
-        is_generated=doc.is_generated,
-        is_pinned=doc.is_pinned,
-        github_path=doc.github_path,
-        sync_status=doc.sync_status,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
-    )
+        doc = await document_ops.create(
+            db,
+            obj_in={
+                "product_id": api_key.product_id,
+                "title": data.title,
+                "content": data.content,
+                "type": data.type,
+                "folder": data.folder,
+                "section": data.section,
+                "subsection": data.subsection,
+                "is_generated": False,
+            },
+            created_by_user_id=api_key.created_by_user_id,
+        )
+        await db.commit()
+
+        return MCPDocumentResponse(
+            id=doc.id,
+            title=doc.title,
+            content=doc.content,
+            type=doc.type,
+            folder=doc.folder,
+            section=doc.section,
+            subsection=doc.subsection,
+            is_generated=doc.is_generated,
+            is_pinned=doc.is_pinned,
+            github_path=doc.github_path,
+            sync_status=doc.sync_status,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
+        )
 
 
 @router.patch("/documents/{document_id}", response_model=MCPDocumentResponse)
@@ -757,39 +787,42 @@ async def update_document(
     document_id: uuid_pkg.UUID,
     data: MCPDocumentUpdate,
     api_key: ProductApiKey = Depends(require_scope("mcp:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPDocumentResponse:
     """Update an existing document."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_write", MCP_WRITE_LIMIT)
 
-    result = await db.execute(
-        select(Document).where(
-            Document.id == document_id,  # type: ignore[arg-type]
-            Document.product_id == api_key.product_id,  # type: ignore[arg-type]
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
+
+        result = await db.execute(
+            select(Document).where(
+                Document.id == document_id,  # type: ignore[arg-type]
+                Document.product_id == api_key.product_id,  # type: ignore[arg-type]
+            )
         )
-    )
-    doc = result.scalar_one_or_none()
-    if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+        doc = result.scalar_one_or_none()
+        if not doc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    update_data = data.model_dump(exclude_unset=True)
-    doc = await document_ops.update(db, db_obj=doc, obj_in=update_data)
+        update_data = data.model_dump(exclude_unset=True)
+        doc = await document_ops.update(db, db_obj=doc, obj_in=update_data)
+        await db.commit()
 
-    return MCPDocumentResponse(
-        id=doc.id,
-        title=doc.title,
-        content=doc.content,
-        type=doc.type,
-        folder=doc.folder,
-        section=doc.section,
-        subsection=doc.subsection,
-        is_generated=doc.is_generated,
-        is_pinned=doc.is_pinned,
-        github_path=doc.github_path,
-        sync_status=doc.sync_status,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
-    )
+        return MCPDocumentResponse(
+            id=doc.id,
+            title=doc.title,
+            content=doc.content,
+            type=doc.type,
+            folder=doc.folder,
+            section=doc.section,
+            subsection=doc.subsection,
+            is_generated=doc.is_generated,
+            is_pinned=doc.is_pinned,
+            github_path=doc.github_path,
+            sync_status=doc.sync_status,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
+        )
 
 
 @router.post(
@@ -800,40 +833,43 @@ async def update_document(
 async def create_work_item(
     data: MCPWorkItemCreate,
     api_key: ProductApiKey = Depends(require_scope("mcp:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPWorkItemResponse:
     """Create a new work item in the product."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_write", MCP_WRITE_LIMIT)
 
-    item = await work_item_ops.create(
-        db,
-        obj_in={
-            "product_id": api_key.product_id,
-            "title": data.title,
-            "description": data.description,
-            "type": data.type,
-            "status": "reported",
-            "priority": data.priority,
-            "tags": data.tags,
-            "source": "mcp",
-        },
-        created_by_user_id=api_key.created_by_user_id,
-    )
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPWorkItemResponse(
-        id=item.id,
-        title=item.title,
-        description=item.description,
-        type=item.type,
-        status=item.status,
-        priority=item.priority,
-        tags=item.tags,
-        source=item.source,
-        reporter_email=item.reporter_email,
-        reporter_name=item.reporter_name,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
-    )
+        item = await work_item_ops.create(
+            db,
+            obj_in={
+                "product_id": api_key.product_id,
+                "title": data.title,
+                "description": data.description,
+                "type": data.type,
+                "status": "reported",
+                "priority": data.priority,
+                "tags": data.tags,
+                "source": "mcp",
+            },
+            created_by_user_id=api_key.created_by_user_id,
+        )
+        await db.commit()
+
+        return MCPWorkItemResponse(
+            id=item.id,
+            title=item.title,
+            description=item.description,
+            type=item.type,
+            status=item.status,
+            priority=item.priority,
+            tags=item.tags,
+            source=item.source,
+            reporter_email=item.reporter_email,
+            reporter_name=item.reporter_name,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
 
 
 @router.patch("/work-items/{work_item_id}", response_model=MCPWorkItemResponse)
@@ -841,39 +877,42 @@ async def update_work_item(
     work_item_id: uuid_pkg.UUID,
     data: MCPWorkItemUpdate,
     api_key: ProductApiKey = Depends(require_scope("mcp:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPWorkItemResponse:
     """Update an existing work item."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_write", MCP_WRITE_LIMIT)
 
-    result = await db.execute(
-        select(WorkItem).where(
-            WorkItem.id == work_item_id,  # type: ignore[arg-type]
-            WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
-            WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
+
+        result = await db.execute(
+            select(WorkItem).where(
+                WorkItem.id == work_item_id,  # type: ignore[arg-type]
+                WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
+                WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
+            )
         )
-    )
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work item not found")
+        item = result.scalar_one_or_none()
+        if not item:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Work item not found")
 
-    update_data = data.model_dump(exclude_unset=True)
-    item = await work_item_ops.update(db, db_obj=item, obj_in=update_data)
+        update_data = data.model_dump(exclude_unset=True)
+        item = await work_item_ops.update(db, db_obj=item, obj_in=update_data)
+        await db.commit()
 
-    return MCPWorkItemResponse(
-        id=item.id,
-        title=item.title,
-        description=item.description,
-        type=item.type,
-        status=item.status,
-        priority=item.priority,
-        tags=item.tags,
-        source=item.source,
-        reporter_email=item.reporter_email,
-        reporter_name=item.reporter_name,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
-    )
+        return MCPWorkItemResponse(
+            id=item.id,
+            title=item.title,
+            description=item.description,
+            type=item.type,
+            status=item.status,
+            priority=item.priority,
+            tags=item.tags,
+            source=item.source,
+            reporter_email=item.reporter_email,
+            reporter_name=item.reporter_name,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -886,31 +925,36 @@ async def generate_docs(
     background_tasks: BackgroundTasks,
     data: MCPGenerateDocsRequest | None = None,
     api_key: ProductApiKey = Depends(require_scope("mcp:admin")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPGenerateDocsResponse:
     """Trigger AI documentation generation for the product.
 
     Runs as a background task. Poll GET /api/v1/mcp/docs-status for progress.
+    The background task opens its own RLS-scoped session internally (known-user
+    background-task pattern from v0.31.3); the request-session work below only
+    marks the product as ``generating`` before returning.
     """
     rate_limiter.check_rate_limit(api_key.id, "mcp_admin", MCP_ADMIN_LIMIT)
 
-    product = await db.get(Product, api_key.product_id)
-    if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-
-    if product.docs_generation_status == "generating":
-        return MCPGenerateDocsResponse(
-            status="already_running",
-            message="Documentation generation already in progress",
-        )
-
     mode = data.mode if data else "full"
 
-    product.docs_generation_status = "generating"
-    product.docs_generation_error = None
-    product.docs_generation_progress = None
-    db.add(product)
-    await db.commit()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
+
+        product = await db.get(Product, api_key.product_id)
+        if not product:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+        if product.docs_generation_status == "generating":
+            return MCPGenerateDocsResponse(
+                status="already_running",
+                message="Documentation generation already in progress",
+            )
+
+        product.docs_generation_status = "generating"
+        product.docs_generation_error = None
+        product.docs_generation_progress = None
+        db.add(product)
+        await db.commit()
 
     # Import here to avoid circular imports — same pattern as docs_generation.py
     from app.api.v1.products.docs_generation import run_document_orchestrator
@@ -932,27 +976,28 @@ async def generate_docs(
 @router.get("/docs-status", response_model=MCPDocsStatusResponse)
 async def get_docs_status(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPDocsStatusResponse:
     """Get current documentation generation status (for polling after generate-docs)."""
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    product = await db.get(Product, api_key.product_id)
-    if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPDocsStatusResponse(
-        status=product.docs_generation_status or "idle",
-        progress=product.docs_generation_progress,
-        error=product.docs_generation_error,
-        last_generated_at=product.last_docs_generated_at,
-    )
+        product = await db.get(Product, api_key.product_id)
+        if not product:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+        return MCPDocsStatusResponse(
+            status=product.docs_generation_status or "idle",
+            progress=product.docs_generation_progress,
+            error=product.docs_generation_error,
+            last_generated_at=product.last_docs_generated_at,
+        )
 
 
 @router.get("/codebase-context", response_model=MCPCodebaseContextResponse)
 async def get_codebase_context(
     api_key: ProductApiKey = Depends(require_scope("mcp:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPCodebaseContextResponse:
     """Get the stored codebase analysis context for the product.
 
@@ -962,23 +1007,25 @@ async def get_codebase_context(
     """
     rate_limiter.check_rate_limit(api_key.id, "mcp_read", MCP_READ_LIMIT)
 
-    product = await db.get(Product, api_key.product_id)
-    if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    return MCPCodebaseContextResponse(
-        product_id=product.id,
-        name=product.name,
-        analysis_status=product.analysis_status,
-        product_overview=product.product_overview,
-    )
+        product = await db.get(Product, api_key.product_id)
+        if not product:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+        return MCPCodebaseContextResponse(
+            product_id=product.id,
+            name=product.name,
+            analysis_status=product.analysis_status,
+            product_overview=product.product_overview,
+        )
 
 
 @router.post("/sync-docs", response_model=MCPSyncDocsResponse)
 async def sync_docs_to_repo(
     data: MCPSyncDocsRequest | None = None,
     api_key: ProductApiKey = Depends(require_scope("mcp:admin")),
-    db: AsyncSession = Depends(get_db),
 ) -> MCPSyncDocsResponse:
     """Push documents to the linked GitHub repository.
 
@@ -989,80 +1036,83 @@ async def sync_docs_to_repo(
 
     request = data or MCPSyncDocsRequest()
 
-    # Get documents to sync
-    if request.document_ids:
-        doc_uuids = [uuid_pkg.UUID(d) for d in request.document_ids]
-        result = await db.execute(
-            select(Document).where(
-                Document.id.in_(doc_uuids),
-                Document.product_id == api_key.product_id,  # type: ignore[arg-type]
-            )
-        )
-        documents = list(result.scalars().all())
-    else:
-        documents = await document_ops.get_with_local_changes(db, product_id=api_key.product_id)
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    if not documents:
-        return MCPSyncDocsResponse(
-            success=True,
-            files_synced=0,
-            errors=["No documents to sync"],
-        )
-
-    # Get primary GitHub repository
-    repos = await repository_ops.get_github_repos_by_product(db, product_id=api_key.product_id)
-    if not repos:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No GitHub repositories linked to this product",
-        )
-
-    repo = repos[0]
-
-    if not repo.sync_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Sync is not enabled for this repository. "
-            "Enable it in Product Settings > Sync before pushing.",
-        )
-
-    # Resolve GitHub token
-    resolver = TokenResolver(db)
-    github_token, token_method = await resolver.resolve_token(repo, api_key.created_by_user_id)
-    if not github_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No GitHub token available for this repository",
-        )
-
-    # Check write permission for GitHub App tokens
-    if token_method == "github_app":
-        product = await db.get(Product, api_key.product_id)
-        if product and product.organization_id:
-            from app.domain import github_app_installation_ops
-
-            installation = await github_app_installation_ops.get_for_org(
-                db, product.organization_id
-            )
-            if installation and installation.permissions.get("contents") == "read":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="GitHub App has read-only 'contents' permission. "
-                    "Sync requires 'contents: write'.",
+        # Get documents to sync
+        if request.document_ids:
+            doc_uuids = [uuid_pkg.UUID(d) for d in request.document_ids]
+            result = await db.execute(
+                select(Document).where(
+                    Document.id.in_(doc_uuids),
+                    Document.product_id == api_key.product_id,  # type: ignore[arg-type]
                 )
+            )
+            documents = list(result.scalars().all())
+        else:
+            documents = await document_ops.get_with_local_changes(db, product_id=api_key.product_id)
 
-    from app.services.docs.sync_service import DocsSyncService
+        if not documents:
+            return MCPSyncDocsResponse(
+                success=True,
+                files_synced=0,
+                errors=["No documents to sync"],
+            )
 
-    github_service = GitHubService(github_token)
-    sync_service = DocsSyncService(db, github_service)
-    sync_result = await sync_service.sync_to_repo(documents, repo, request.message)
+        # Get primary GitHub repository
+        repos = await repository_ops.get_github_repos_by_product(db, product_id=api_key.product_id)
+        if not repos:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No GitHub repositories linked to this product",
+            )
 
-    return MCPSyncDocsResponse(
-        success=sync_result.success,
-        files_synced=sync_result.files_synced,
-        commit_sha=sync_result.commit_sha,
-        branch=sync_result.branch,
-        pr_url=sync_result.pr_url,
-        pr_number=sync_result.pr_number,
-        errors=sync_result.errors,
-    )
+        repo = repos[0]
+
+        if not repo.sync_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Sync is not enabled for this repository. "
+                "Enable it in Product Settings > Sync before pushing.",
+            )
+
+        # Resolve GitHub token
+        resolver = TokenResolver(db)
+        github_token, token_method = await resolver.resolve_token(repo, api_key.created_by_user_id)
+        if not github_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No GitHub token available for this repository",
+            )
+
+        # Check write permission for GitHub App tokens
+        if token_method == "github_app":
+            product = await db.get(Product, api_key.product_id)
+            if product and product.organization_id:
+                from app.domain import github_app_installation_ops
+
+                installation = await github_app_installation_ops.get_for_org(
+                    db, product.organization_id
+                )
+                if installation and installation.permissions.get("contents") == "read":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="GitHub App has read-only 'contents' permission. "
+                        "Sync requires 'contents: write'.",
+                    )
+
+        from app.services.docs.sync_service import DocsSyncService
+
+        github_service = GitHubService(github_token)
+        sync_service = DocsSyncService(db, github_service, user_id=api_key.created_by_user_id)
+        sync_result = await sync_service.sync_to_repo(documents, repo, request.message)
+
+        return MCPSyncDocsResponse(
+            success=sync_result.success,
+            files_synced=sync_result.files_synced,
+            commit_sha=sync_result.commit_sha,
+            branch=sync_result.branch,
+            pr_url=sync_result.pr_url,
+            pr_number=sync_result.pr_number,
+            errors=sync_result.errors,
+        )

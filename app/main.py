@@ -106,6 +106,7 @@ async def public_domain_middleware(
         or path == "/health"
         or path.startswith("/api/v1/public/")
         or path.startswith("/api/v1/partner/")
+        or path.startswith("/api/v1/webhooks/")
     )
 
     if not is_allowed:
@@ -191,6 +192,50 @@ async def log_requests(request: Request, call_next):
     ):
         logger.info(f"{request.method} {path} → {response.status_code}")
 
+    return response
+
+
+def _attach_cors_headers(request: Request, response: Response) -> None:
+    """Echo CORS headers onto a response so it isn't masked as a CORS failure.
+
+    Starlette's ``ServerErrorMiddleware`` sits *outside* every user-registered
+    middleware (including ``CORSMiddleware``), so unhandled-exception 500s
+    bypass CORS on the way back to the browser. With no
+    ``Access-Control-Allow-Origin`` header, the browser surfaces them as CORS
+    errors, masking the real failure (this is how the v0.31.0 RLS 500s on
+    ``billing_events`` initially appeared during the cutover).
+
+    Safe to call from exception handlers: mirrors the existing
+    ``CORSMiddleware`` policy (credentials on, specific origin echoed) without
+    re-implementing CORS spec.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    if "*" in settings.cors_origins or origin in settings.cors_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch unhandled exceptions, attach CORS headers, return a 500.
+
+    Without this, the browser sees the 500 as a CORS error and the actual
+    cause (RLS denial, CHECK violation, runtime error) is hidden from the
+    Network tab. ``HTTPException`` and ``RequestValidationError`` continue to
+    use FastAPI's built-in handlers — class-based dispatch picks the
+    most-specific handler, so this only catches what nothing else does.
+    """
+    logger.exception(
+        f"Unhandled exception on {request.method} {request.url.path}: {exc!r}"
+    )
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"},
+    )
+    _attach_cors_headers(request, response)
     return response
 
 

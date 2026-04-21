@@ -128,6 +128,12 @@ async def get_current_user(
             detail="Could not validate credentials",
         ) from None
 
+    # RLS context must be established before the user-row lookup. The lookup
+    # itself queries an RLS-protected table, so without app.current_user_id
+    # set, app_user_id() returns NULL and the user's own row is filtered out.
+    # (Pre-trajan_app this was hidden by the postgres role's BYPASSRLS.)
+    await set_rls_user_context(db, user_id)
+
     # Get or create user
     statement = select(User).where(User.id == user_id)
     result = await db.execute(statement)

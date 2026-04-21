@@ -27,6 +27,7 @@ def _make_agent():
     agent.product.name = "Test Product"
     agent.product.user_id = uuid.uuid4()
     agent.created_by_user_id = agent.product.user_id
+    agent.user_id = agent.product.user_id
     agent.github_service = None
     return agent
 

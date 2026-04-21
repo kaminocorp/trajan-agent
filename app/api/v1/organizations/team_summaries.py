@@ -18,7 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.api.v1.organizations.helpers import require_org_access
 from app.api.v1.progress.commit_fetcher import fetch_commit_stats, fetch_product_commits
-from app.core.database import direct_session_maker, get_direct_db
+from app.core.database import async_session_maker, get_direct_db
+from app.core.rls import set_rls_user_context
 from app.domain import product_ops, team_contributor_summary_ops
 from app.models.user import User
 from app.services.progress.summarizer import (
@@ -124,8 +125,14 @@ async def _background_regenerate(
     """
     lock_key = f"{org_id}:{period}"
     try:
-        async with direct_session_maker() as session:
+        async with async_session_maker() as session:
             try:
+                # Fresh session → must set RLS context before any RLS-protected query.
+                # Pre-cutover this path ran on `direct_session_maker` (postgres, BYPASSRLS)
+                # and therefore read cross-tenant data. Post-swap it reads the same view
+                # the acting user sees via per-product RLS policies.
+                await set_rls_user_context(session, user_id)
+
                 # Re-fetch user in this session's scope
                 from sqlalchemy import select
 
