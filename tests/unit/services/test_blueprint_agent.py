@@ -30,6 +30,7 @@ def _make_agent():
     agent.product.user_id = uuid.uuid4()
     agent.github_service = AsyncMock()
     agent.client = AsyncMock()
+    agent.user_id = uuid.uuid4()
     return agent
 
 

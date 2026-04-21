@@ -12,17 +12,17 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import Field, SQLModel
 
 from app.api.deps.api_key_auth import require_scope
-from app.core.database import get_db
+from app.core.database import async_session_maker
 from app.core.rate_limit import (
     PUBLIC_INTERPRET_LIMIT,
     PUBLIC_READ_LIMIT,
     PUBLIC_WRITE_LIMIT,
     rate_limiter,
 )
+from app.core.rls import set_rls_user_context
 from app.domain.work_item_operations import work_item_ops
 from app.models.product_api_key import ProductApiKey
 from app.models.work_item import WorkItem
@@ -151,7 +151,6 @@ async def create_ticket(
     data: PublicTicketCreate,
     response: Response,
     api_key: ProductApiKey = Depends(require_scope("tickets:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> PublicTicketResponse | PublicTicketDuplicate:
     """Create a ticket with structured fields."""
     rate_limiter.check_rate_limit(api_key.id, "public_write", PUBLIC_WRITE_LIMIT)
@@ -173,43 +172,46 @@ async def create_ticket(
             ),
         )
 
-    # Check for duplicates
-    duplicate = await find_duplicate_work_item(db, api_key.product_id, data.title)
-    if duplicate:
-        response.status_code = status.HTTP_200_OK
-        return PublicTicketDuplicate(
-            existing_ticket_id=duplicate.id,
-            existing_ticket_title=duplicate.title or "",
-            existing_ticket_status=duplicate.status,
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
+
+        # Check for duplicates — RLS-protected read, must run after set_rls_user_context
+        duplicate = await find_duplicate_work_item(db, api_key.product_id, data.title)
+        if duplicate:
+            response.status_code = status.HTTP_200_OK
+            return PublicTicketDuplicate(
+                existing_ticket_id=duplicate.id,
+                existing_ticket_title=duplicate.title or "",
+                existing_ticket_status=duplicate.status,
+            )
+
+        work_item = await work_item_ops.create(
+            db,
+            obj_in={
+                "product_id": api_key.product_id,
+                "title": data.title,
+                "description": data.description,
+                "type": data.type,
+                "status": "reported",
+                "priority": PRIORITY_MAP.get(data.priority, 3) if data.priority else 3,
+                "source": "api",
+                "reporter_email": data.reporter_email,
+                "reporter_name": data.reporter_name,
+                "tags": data.tags,
+                "ticket_metadata": data.extra_metadata,
+            },
+            created_by_user_id=api_key.created_by_user_id,
         )
+        await db.commit()
 
-    # Create work item
-    work_item = await work_item_ops.create(
-        db,
-        obj_in={
-            "product_id": api_key.product_id,
-            "title": data.title,
-            "description": data.description,
-            "type": data.type,
-            "status": "reported",
-            "priority": PRIORITY_MAP.get(data.priority, 3) if data.priority else 3,
-            "source": "api",
-            "reporter_email": data.reporter_email,
-            "reporter_name": data.reporter_name,
-            "tags": data.tags,
-            "ticket_metadata": data.extra_metadata,
-        },
-        created_by_user_id=api_key.created_by_user_id,
-    )
-
-    return PublicTicketResponse(
-        id=work_item.id,
-        title=work_item.title or "",
-        status=work_item.status or "reported",
-        type=work_item.type,
-        priority=work_item.priority,
-        created_at=work_item.created_at,
-    )
+        return PublicTicketResponse(
+            id=work_item.id,
+            title=work_item.title or "",
+            status=work_item.status or "reported",
+            type=work_item.type,
+            priority=work_item.priority,
+            created_at=work_item.created_at,
+        )
 
 
 @router.post(
@@ -221,14 +223,13 @@ async def interpret_ticket(
     data: PublicTicketInterpret,
     response: Response,
     api_key: ProductApiKey = Depends(require_scope("tickets:write")),
-    db: AsyncSession = Depends(get_db),
 ) -> PublicTicketInterpretResponse | PublicTicketDuplicate:
     """Interpret a raw message via AI and create a structured ticket."""
     rate_limiter.check_rate_limit(api_key.id, "public_interpret", PUBLIC_INTERPRET_LIMIT)
 
     from app.services.interpreter import MessageInput, MessageToTicketInterpreter
 
-    # Build message input
+    # Interpret via AI (no DB work — safe to run before opening the scoped session)
     message_input = MessageInput(
         content=data.message,
         title=data.title,
@@ -236,15 +237,10 @@ async def interpret_ticket(
         user_email=data.reporter_email,
         metadata=data.extra_metadata or {},
     )
-
-    # Interpret via AI
     interpreter = MessageToTicketInterpreter()
     ticket = await interpreter.interpret(message_input)
 
-    # Extract title: first sentence, truncated to 500 chars
     title = ticket.summary.split(". ")[0][:500]
-
-    # Build description: full summary + acceptance criteria
     description_parts = [ticket.summary]
     if ticket.acceptance_criteria:
         description_parts.append("\n\nAcceptance Criteria:")
@@ -252,50 +248,51 @@ async def interpret_ticket(
             description_parts.append(f"- {criterion}")
     description = "\n".join(description_parts)
 
-    # Check for duplicates
-    duplicate = await find_duplicate_work_item(db, api_key.product_id, title)
-    if duplicate:
-        response.status_code = status.HTTP_200_OK
-        return PublicTicketDuplicate(
-            existing_ticket_id=duplicate.id,
-            existing_ticket_title=duplicate.title or "",
-            existing_ticket_status=duplicate.status,
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
+
+        duplicate = await find_duplicate_work_item(db, api_key.product_id, title)
+        if duplicate:
+            response.status_code = status.HTTP_200_OK
+            return PublicTicketDuplicate(
+                existing_ticket_id=duplicate.id,
+                existing_ticket_title=duplicate.title or "",
+                existing_ticket_status=duplicate.status,
+            )
+
+        work_item = await work_item_ops.create(
+            db,
+            obj_in={
+                "product_id": api_key.product_id,
+                "title": title,
+                "description": description,
+                "type": ticket.ticket_type,
+                "status": "reported",
+                "priority": PRIORITY_MAP.get(ticket.priority, 3),
+                "source": "api_interpreted",
+                "tags": ticket.suggested_labels,
+                "reporter_email": data.reporter_email,
+                "reporter_name": data.reporter_name,
+                "ticket_metadata": data.extra_metadata,
+            },
+            created_by_user_id=api_key.created_by_user_id,
         )
+        await db.commit()
 
-    # Create work item
-    work_item = await work_item_ops.create(
-        db,
-        obj_in={
-            "product_id": api_key.product_id,
-            "title": title,
-            "description": description,
-            "type": ticket.ticket_type,
-            "status": "reported",
-            "priority": PRIORITY_MAP.get(ticket.priority, 3),
-            "source": "api_interpreted",
-            "tags": ticket.suggested_labels,
-            "reporter_email": data.reporter_email,
-            "reporter_name": data.reporter_name,
-            "ticket_metadata": data.extra_metadata,
-        },
-        created_by_user_id=api_key.created_by_user_id,
-    )
-
-    return PublicTicketInterpretResponse(
-        id=work_item.id,
-        title=work_item.title or "",
-        status=work_item.status or "reported",
-        type=work_item.type,
-        priority=work_item.priority,
-        created_at=work_item.created_at,
-        confidence=ticket.confidence,
-    )
+        return PublicTicketInterpretResponse(
+            id=work_item.id,
+            title=work_item.title or "",
+            status=work_item.status or "reported",
+            type=work_item.type,
+            priority=work_item.priority,
+            created_at=work_item.created_at,
+            confidence=ticket.confidence,
+        )
 
 
 @router.get("/", response_model=PublicTicketListResponse)
 async def list_tickets(
     api_key: ProductApiKey = Depends(require_scope("tickets:read")),
-    db: AsyncSession = Depends(get_db),
     status_filter: str | None = Query(None, alias="status"),
     type_filter: str | None = Query(None, alias="type"),
     source: str | None = Query(None),
@@ -318,82 +315,84 @@ async def list_tickets(
     if source:
         base_where.append(WorkItem.source == source)
     if q:
-        # Escape SQL LIKE wildcards so user input is treated as literal text
         escaped_q = q.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
         base_where.append(
             WorkItem.title.ilike(f"%{escaped_q}%", escape="\\")  # type: ignore[union-attr]
         )
 
-    # Count query
-    count_stmt = select(func.count()).select_from(WorkItem).where(*base_where)
-    total_result = await db.execute(count_stmt)
-    total = total_result.scalar_one()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    # Data query
-    data_stmt = (
-        select(WorkItem)
-        .where(*base_where)
-        .order_by(WorkItem.created_at.desc())  # type: ignore[attr-defined]
-        .limit(limit)
-        .offset(offset)
-    )
-    result = await db.execute(data_stmt)
-    items = result.scalars().all()
+        count_stmt = select(func.count()).select_from(WorkItem).where(*base_where)
+        total_result = await db.execute(count_stmt)
+        total = total_result.scalar_one()
 
-    return PublicTicketListResponse(
-        items=[
-            PublicTicketList(
-                id=item.id,
-                title=item.title or "",
-                type=item.type,
-                status=item.status,
-                priority=item.priority,
-                source=item.source,
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-            )
-            for item in items
-        ],
-        total=total,
-        limit=limit,
-        offset=offset,
-    )
+        data_stmt = (
+            select(WorkItem)
+            .where(*base_where)
+            .order_by(WorkItem.created_at.desc())  # type: ignore[attr-defined]
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await db.execute(data_stmt)
+        items = result.scalars().all()
+
+        return PublicTicketListResponse(
+            items=[
+                PublicTicketList(
+                    id=item.id,
+                    title=item.title or "",
+                    type=item.type,
+                    status=item.status,
+                    priority=item.priority,
+                    source=item.source,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+                for item in items
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @router.get("/{ticket_id}", response_model=PublicTicketDetail)
 async def get_ticket(
     ticket_id: uuid_pkg.UUID,
     api_key: ProductApiKey = Depends(require_scope("tickets:read")),
-    db: AsyncSession = Depends(get_db),
 ) -> PublicTicketDetail:
     """Get a single ticket by ID."""
     rate_limiter.check_rate_limit(api_key.id, "public_read", PUBLIC_READ_LIMIT)
 
-    statement = select(WorkItem).where(
-        WorkItem.id == ticket_id,  # type: ignore[arg-type]
-        WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
-        WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
-    )
-    result = await db.execute(statement)
-    work_item = result.scalar_one_or_none()
+    async with async_session_maker() as db:
+        await set_rls_user_context(db, api_key.created_by_user_id)
 
-    if not work_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Ticket not found",
+        statement = select(WorkItem).where(
+            WorkItem.id == ticket_id,  # type: ignore[arg-type]
+            WorkItem.product_id == api_key.product_id,  # type: ignore[arg-type]
+            WorkItem.deleted_at.is_(None),  # type: ignore[union-attr]
         )
+        result = await db.execute(statement)
+        work_item = result.scalar_one_or_none()
 
-    return PublicTicketDetail(
-        id=work_item.id,
-        title=work_item.title or "",
-        description=work_item.description,
-        type=work_item.type,
-        status=work_item.status,
-        priority=work_item.priority,
-        tags=work_item.tags,
-        source=work_item.source,
-        reporter_email=work_item.reporter_email,
-        reporter_name=work_item.reporter_name,
-        created_at=work_item.created_at,
-        updated_at=work_item.updated_at,
-    )
+        if not work_item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+
+        return PublicTicketDetail(
+            id=work_item.id,
+            title=work_item.title or "",
+            description=work_item.description,
+            type=work_item.type,
+            status=work_item.status,
+            priority=work_item.priority,
+            tags=work_item.tags,
+            source=work_item.source,
+            reporter_email=work_item.reporter_email,
+            reporter_name=work_item.reporter_name,
+            created_at=work_item.created_at,
+            updated_at=work_item.updated_at,
+        )

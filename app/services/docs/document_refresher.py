@@ -21,6 +21,7 @@ import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.rls import set_rls_user_context
 from app.domain.document_operations import document_ops
 from app.models.document import Document
 from app.models.repository import Repository
@@ -70,9 +71,16 @@ class DocumentRefresher:
         self,
         db: AsyncSession,
         github_service: GitHubService,
+        user_id: uuid_pkg.UUID,
     ) -> None:
         self.db = db
         self.github_service = github_service
+        # Acting user for RLS context — re-armed after every commit on
+        # ``self.db`` so the post-commit ``refresh(document)`` SELECT runs
+        # under the correct user. ``get_db_with_rls`` sets the initial
+        # context; commits drop ``SET LOCAL`` and the listener in
+        # ``core/database.py`` rehydrates via ``session.info``.
+        self.user_id = user_id
         self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self.codebase_analyzer = CodebaseAnalyzer(github_service)
 
@@ -117,6 +125,8 @@ class DocumentRefresher:
                 document.content = refresh_response["content"]
                 self.db.add(document)
                 await self.db.commit()
+                # Commit dropped SET LOCAL; re-arm before the refresh SELECT.
+                await set_rls_user_context(self.db, self.user_id)
                 await self.db.refresh(document)
 
                 logger.info(f"Updated document: {document.title}")
