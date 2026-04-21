@@ -19,6 +19,7 @@ import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.rls import set_rls_user_context
 from app.models.document import Document
 from app.models.product import Product
 from app.services.docs.claude_helpers import call_with_retry, select_model
@@ -48,8 +49,14 @@ class DocumentGenerator:
     with focused context from relevant source files.
     """
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, user_id: UUID) -> None:
         self.db = db
+        # Acting user — used to re-arm RLS context after every per-doc
+        # commit so subsequent refresh/SELECTs still evaluate under the
+        # correct user. The ``after_begin`` listener reads this via
+        # ``session.info`` too; the explicit re-call below is the
+        # belt-and-braces layer.
+        self.user_id = user_id
         self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     async def generate(
@@ -95,6 +102,9 @@ class DocumentGenerator:
             )
             self.db.add(doc)
             await self.db.commit()
+            # Commit dropped SET LOCAL; re-arm before the refresh SELECT
+            # and any subsequent sub-agents running on the same session.
+            await set_rls_user_context(self.db, self.user_id)
             await self.db.refresh(doc)
 
             logger.info(f"Generated document: {planned_doc.title}")
