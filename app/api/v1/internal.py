@@ -3,18 +3,24 @@
 These endpoints are primarily for manual triggering and debugging.
 Scheduled jobs run automatically via APScheduler (see services/scheduler.py).
 Endpoints bypass Supabase JWT auth and instead validate a shared secret via X-Cron-Secret.
+
+**Phase 3f refactor (cron-role bypass-then-scope plan):** every endpoint
+delegates to ``scheduler.trigger_now(<job_id>)``. The full bypass-then-scope
+discipline (bootstrap on ``cron_session_maker`` → per-tenant scoped session
+with RLS context) lives in ``services/scheduler.py`` — these HTTP surfaces
+no longer open their own DB sessions. Rationale: any difference between
+the manual-trigger path and the APScheduler path would defeat the purpose
+of having a manual trigger.
 """
 
 import hmac
 import logging
-from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Header, HTTPException, status
 
 from app.config.settings import settings
-from app.core.database import get_db
+from app.services.scheduler import scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -35,85 +41,51 @@ def _verify_cron_secret(x_cron_secret: str = Header(...)) -> None:
         )
 
 
+def _lock_held_response() -> dict[str, Any]:
+    """Returned when ``trigger_now`` returns None — advisory lock held by
+    another instance (expected during multi-instance deploys)."""
+    return {"status": "skipped", "reason": "lock held by another instance"}
+
+
 @router.post("/auto-progress")
 async def trigger_auto_progress(
     x_cron_secret: str = Header(...),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Manually trigger auto-progress generation for all eligible organizations.
+    """Manually trigger auto-progress generation for every eligible org.
 
-    Protected by X-Cron-Secret header. Useful for testing or forcing a refresh.
-    Note: This job runs automatically via APScheduler — see services/scheduler.py.
+    Delegates to :meth:`Scheduler.trigger_now` so the HTTP path runs the
+    exact same bypass-then-scope flow as the hourly APScheduler run.
     """
     _verify_cron_secret(x_cron_secret)
-
-    from app.services.progress.auto_generator import auto_progress_generator
-
-    report = await auto_progress_generator.run_for_all_orgs(db)
-    await db.commit()
-
-    return asdict(report)
+    result = await scheduler.trigger_now("auto_progress")
+    return result or _lock_held_response()
 
 
 @router.post("/send-plan-prompt-emails")
 async def trigger_plan_prompt_emails(
     x_cron_secret: str = Header(...),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Manually trigger plan-selection prompt emails for orgs without a plan.
-
-    Protected by X-Cron-Secret header. Useful for testing or forcing a send.
-    Note: This job runs automatically via APScheduler — see services/scheduler.py.
-    """
+    """Manually trigger plan-selection prompt emails for orgs without a plan."""
     _verify_cron_secret(x_cron_secret)
-
-    from app.services.email.plan_prompt import send_plan_selection_prompts
-
-    report = await send_plan_selection_prompts(db)
-    await db.commit()
-
-    return asdict(report)
+    result = await scheduler.trigger_now("plan_prompt_emails")
+    return result or _lock_held_response()
 
 
 @router.post("/send-weekly-digest")
 async def trigger_weekly_digest(
     x_cron_secret: str = Header(...),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Manually trigger the weekly digest email for all opted-in users.
-
-    Protected by X-Cron-Secret header. Useful for testing or forcing a send.
-    Note: This job runs automatically via APScheduler — see services/scheduler.py.
-    """
+    """Manually trigger the weekly digest email for all opted-in users."""
     _verify_cron_secret(x_cron_secret)
-
-    from app.services.email.weekly_digest import send_digests
-
-    report = await send_digests(db, frequency="weekly")
-    await db.commit()
-
-    return asdict(report)
+    result = await scheduler.trigger_now("weekly_digest")
+    return result or _lock_held_response()
 
 
 @router.post("/send-daily-digest")
 async def trigger_daily_digest(
     x_cron_secret: str = Header(...),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """
-    Manually trigger the daily digest email for all opted-in users.
-
-    Protected by X-Cron-Secret header. Useful for testing or forcing a send.
-    Note: This job runs automatically via APScheduler — see services/scheduler.py.
-    """
+    """Manually trigger the daily digest email for all opted-in users."""
     _verify_cron_secret(x_cron_secret)
-
-    from app.services.email.weekly_digest import send_digests
-
-    report = await send_digests(db, frequency="daily")
-    await db.commit()
-
-    return asdict(report)
+    result = await scheduler.trigger_now("daily_digest")
+    return result or _lock_held_response()

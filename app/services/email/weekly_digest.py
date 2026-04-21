@@ -72,6 +72,32 @@ class WeeklyDigestReport:
     skipped_reasons: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DigestTarget:
+    """Immutable work unit produced by :func:`enumerate_digest_eligible_users`.
+
+    Carries only primitives so it crosses the bootstrap/scoped session
+    boundary safely — ORM objects don't travel between sessions.
+    The caller of :func:`send_digest_for_user` must set RLS context
+    to ``user_id`` on the scoped session before invoking.
+    """
+
+    user_id: uuid_pkg.UUID
+    organization_id: uuid_pkg.UUID
+    user_email: str
+    org_name: str
+    org_role: str
+    digest_product_ids: tuple[str, ...] | None  # None ⇒ all org products
+
+
+@dataclass
+class DigestEnumeration:
+    """Bootstrap output from :func:`enumerate_digest_eligible_users`."""
+
+    total_checked: int = 0
+    eligible: list[DigestTarget] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Email template
 # ---------------------------------------------------------------------------
@@ -384,17 +410,233 @@ async def _send_digest_for_org(
         return False
 
 
+async def enumerate_digest_eligible_users(
+    cron_db: AsyncSession,
+    frequency: str,
+) -> DigestEnumeration:
+    """Bootstrap half: find every ``OrgDigestPreference`` whose owner's
+    local time currently matches their configured digest hour.
+
+    Runs on ``cron_session_maker`` (BYPASSRLS) — cron has no tenant
+    user identity at entry, and the digest surface legitimately needs
+    to enumerate across every opted-in user+org pair.
+
+    Weekly digests additionally require today's weekday to match
+    ``settings.weekly_digest_day`` in the user's own timezone. Daily
+    digests fire every day at the configured hour.
+
+    The returned :class:`DigestTarget` tuples carry every primitive
+    the scoped half needs — user email, org name, and the org role
+    used for product-access checks — so the per-user session never
+    has to cross-reference ``users`` / ``organizations`` /
+    ``organization_members`` under RLS just to set up the send.
+    """
+    enumeration = DigestEnumeration()
+
+    all_prefs = await org_digest_preference_ops.get_all_active_for_frequency(
+        cron_db, frequency
+    )
+    enumeration.total_checked = len(all_prefs)
+    logger.info(
+        f"[{frequency}-digest] Bootstrap: {len(all_prefs)} org-preferences "
+        f"with {frequency} digest enabled"
+    )
+
+    if not all_prefs:
+        return enumeration
+
+    # Timezone + hour filter (per-user)
+    now_utc = datetime.now(UTC)
+    target_day = settings.weekly_digest_day  # e.g. "fri"
+
+    prefs_in_window: list[OrgDigestPreference] = []
+    for pref in all_prefs:
+        try:
+            tz = ZoneInfo(pref.digest_timezone or "UTC")
+        except (KeyError, ValueError):
+            tz = ZoneInfo("UTC")
+        local_now = now_utc.astimezone(tz)
+        hour_match = local_now.hour == (
+            pref.digest_hour if pref.digest_hour is not None else 17
+        )
+
+        if frequency == "weekly":
+            day_abbrev = local_now.strftime("%a").lower()
+            if day_abbrev == target_day and hour_match:
+                prefs_in_window.append(pref)
+        elif frequency == "daily" and hour_match:
+            prefs_in_window.append(pref)
+
+    logger.info(
+        f"[{frequency}-digest] {len(prefs_in_window)} org-preferences "
+        f"eligible for current hour"
+    )
+
+    if not prefs_in_window:
+        return enumeration
+
+    # Batch-load users + orgs on the bootstrap session (single query each)
+    user_ids = {pref.user_id for pref in prefs_in_window}
+    org_ids = {pref.organization_id for pref in prefs_in_window}
+
+    user_result = await cron_db.execute(
+        select(User).where(User.id.in_(user_ids))  # type: ignore[attr-defined]
+    )
+    users_by_id: dict[uuid_pkg.UUID, User] = {
+        u.id: u for u in user_result.scalars().all()
+    }
+
+    org_result = await cron_db.execute(
+        select(Organization).where(
+            Organization.id.in_(org_ids)  # type: ignore[attr-defined]
+        )
+    )
+    orgs_by_id: dict[uuid_pkg.UUID, Organization] = {
+        o.id: o for o in org_result.scalars().all()
+    }
+
+    # Build DigestTargets with role resolution per (user_id, org_id).
+    # Role resolution goes through ``organization_ops.get_member_role``
+    # which caches per-request — cheap enough without a dedicated batch.
+    for pref in prefs_in_window:
+        user = users_by_id.get(pref.user_id)
+        if not user or not user.email:
+            continue
+        org = orgs_by_id.get(pref.organization_id)
+        if not org:
+            continue
+
+        role = await organization_ops.get_member_role(
+            cron_db, pref.organization_id, pref.user_id
+        )
+        if role is None:
+            continue
+
+        role_str = role.value if hasattr(role, "value") else str(role)
+
+        product_filter: tuple[str, ...] | None = None
+        if pref.digest_product_ids:
+            product_filter = tuple(str(pid) for pid in pref.digest_product_ids)
+
+        enumeration.eligible.append(
+            DigestTarget(
+                user_id=pref.user_id,
+                organization_id=pref.organization_id,
+                user_email=user.email,
+                org_name=org.name,
+                org_role=role_str,
+                digest_product_ids=product_filter,
+            )
+        )
+
+    return enumeration
+
+
+async def send_digest_for_user(
+    db: AsyncSession,
+    target: DigestTarget,
+    frequency: str,
+    report: WeeklyDigestReport,
+) -> bool:
+    """Scoped half: build and send the digest for one user+org pair.
+
+    **Contract:** caller has already set RLS context to
+    ``target.user_id`` on ``db``. All reads below
+    (``products``, ``product_access``, ``progress_summaries``,
+    ``dashboard_shipped_summaries``) go through the user's own RLS
+    view — which is exactly what privacy requires.
+
+    Returns True iff an email was actually dispatched.
+    """
+    config = FREQUENCY_CONFIG.get(frequency, FREQUENCY_CONFIG["weekly"])
+    period = config["period"]
+
+    all_products = await _get_org_products(db, target.organization_id)
+    accessible = await _filter_accessible_products(
+        db, all_products, target.user_id, target.org_role
+    )
+
+    if target.digest_product_ids is not None:
+        selected = set(target.digest_product_ids)
+        products = [p for p in accessible if str(p.id) in selected]
+    else:
+        products = accessible
+
+    if not products:
+        report.skipped_reasons["no_products"] = (
+            report.skipped_reasons.get("no_products", 0) + 1
+        )
+        return False
+
+    product_data: list[tuple[str, str, list[dict], list[dict] | None]] = []
+    for product in products:
+        summary = await progress_summary_ops.get_by_product_period(
+            db, product.id, period
+        )
+        shipped = await dashboard_shipped_ops.get_by_product_period(
+            db, product.id, period
+        )
+
+        narrative = summary.summary_text if summary else ""
+        items = shipped.items if shipped and shipped.has_significant_changes else []
+        contrib_summaries = summary.contributor_summaries if summary else None
+
+        if not narrative and not items:
+            continue
+
+        product_data.append((
+            product.name or "Untitled Project",
+            narrative,
+            items,
+            contrib_summaries,
+        ))
+
+    if not product_data:
+        report.skipped_reasons["no_activity"] = (
+            report.skipped_reasons.get("no_activity", 0) + 1
+        )
+        return False
+
+    sections = [
+        _build_product_html(name, narrative, items, contribs)
+        for name, narrative, items, contribs in product_data
+    ]
+    html_body = _build_email_html(sections, settings.frontend_url, frequency)
+    text_body = _build_plain_text(product_data, frequency)
+    subject = config["subject_all"].format(org=target.org_name)
+
+    sent = await postmark_service.send(
+        to=target.user_email,
+        subject=subject,
+        html_body=html_body,
+        text_body=text_body,
+    )
+    if sent:
+        report.emails_sent += 1
+        return True
+    report.errors += 1
+    return False
+
+
 async def send_digests(
     db: AsyncSession,
     frequency: str = "weekly",
 ) -> WeeklyDigestReport:
-    """Send digest emails to eligible users for the given frequency.
+    """Single-session wrapper — **test/dev use only**.
 
-    Called hourly by the scheduler. Queries OrgDigestPreference rows,
-    filters to users whose local time matches their configured digest_hour,
-    then sends one email per org with product-level access enforcement.
+    Production cron goes through :func:`scheduler._run_digest`, which
+    opens ``cron_session_maker`` for enumeration and a fresh
+    RLS-scoped session per digest recipient. This wrapper does both
+    halves on one session: fine under ``postgres`` BYPASSRLS or
+    mocked tests, but once Fly cuts over to ``trajan_app`` the
+    enumeration will return zero rows silently unless the caller has
+    already set an RLS context that admits
+    ``OrgDigestPreference`` SELECTs.
 
-    For weekly: only on the configured digest day. For daily: every day.
+    Queries OrgDigestPreference rows, filters to users whose local time
+    matches their configured digest_hour, then sends one email per org
+    with product-level access enforcement. For weekly: only on the
+    configured digest day. For daily: every day.
     """
     label = f"{frequency}-digest"
     report = WeeklyDigestReport()
