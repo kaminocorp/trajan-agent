@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db_with_rls
 from app.core.database import async_session_maker
+from app.core.rls import set_rls_user_context
 from app.domain.feedback_operations import feedback_ops
 from app.models.feedback import Feedback, FeedbackCreate, FeedbackRead
 from app.models.user import User
@@ -46,7 +47,7 @@ async def submit_feedback(
     feedback = await feedback_ops.create_feedback(db, user_id=current_user.id, data=data)
 
     # Process AI interpretation in background
-    background_tasks.add_task(process_ai_interpretation, feedback.id)
+    background_tasks.add_task(process_ai_interpretation, feedback.id, current_user.id)
 
     return _feedback_to_dict(feedback)
 
@@ -80,10 +81,16 @@ async def get_feedback(
     return _feedback_to_dict(feedback)
 
 
-async def process_ai_interpretation(feedback_id: uuid_pkg.UUID) -> None:
-    """Background task to generate AI summary using modular interpreter."""
+async def process_ai_interpretation(feedback_id: uuid_pkg.UUID, user_id: uuid_pkg.UUID) -> None:
+    """Background task to generate AI summary using modular interpreter.
+
+    The RLS subject is the feedback submitter — they are the only user who can
+    SELECT their own feedback row under the `feedback_select_own` policy.
+    """
     async with async_session_maker() as db:
         try:
+            # Fresh session → must set RLS context before any RLS-protected query.
+            await set_rls_user_context(db, user_id)
             feedback = await feedback_ops.get(db, feedback_id)
             if feedback and not feedback.ai_summary:
                 interpreter = FeedbackInterpreter()

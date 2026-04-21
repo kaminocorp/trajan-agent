@@ -135,6 +135,76 @@ class TestGetCurrentUser:
             assert result == existing_user
 
     @pytest.mark.asyncio
+    async def test_sets_rls_context_before_user_lookup(self):
+        """0.31.0 regression: `set_rls_user_context` must be awaited BEFORE
+        the user-row SELECT. Under trajan_app the SELECT is itself RLS-
+        filtered; without context `app_user_id()` returns NULL, the user's
+        own row is hidden, and the flow falls into the auto-create fallback
+        (which also fails under trajan_app — see pending item 2 of the
+        completion doc). This ordering is the load-bearing fix in 0.31.0."""
+        existing_user = make_mock_user(id=self.user_id)
+        credentials = MagicMock()
+        credentials.credentials = "valid.jwt.token"
+
+        call_order: list[str] = []
+
+        async def record_set_rls(_session, _user_id):
+            call_order.append("set_rls_user_context")
+
+        async def record_execute(*_args, **_kwargs):
+            call_order.append("db.execute")
+            return mock_scalar_result(existing_user)
+
+        self.db.execute = AsyncMock(side_effect=record_execute)
+
+        with (
+            patch(
+                "app.api.deps.auth.set_rls_user_context",
+                side_effect=record_set_rls,
+            ) as mock_rls,
+            patch("app.api.deps.auth.get_jwks", new_callable=AsyncMock) as mock_jwks,
+            patch("app.api.deps.auth.get_signing_key") as mock_get_key,
+            patch("app.api.deps.auth.jwt") as mock_jwt,
+        ):
+            mock_jwks.return_value = {"keys": []}
+            mock_get_key.return_value = MagicMock()
+            mock_jwt.decode.return_value = self.valid_payload
+
+            await get_current_user(credentials=credentials, db=self.db)
+
+        assert call_order, "neither set_rls_user_context nor db.execute was called"
+        assert call_order[0] == "set_rls_user_context", (
+            f"set_rls_user_context must precede db.execute; got {call_order}"
+        )
+        assert "db.execute" in call_order
+        mock_rls.assert_called_once()
+        # user_id must come from the JWT `sub` claim, not any DB state.
+        _, passed_user_id = mock_rls.call_args.args
+        assert passed_user_id == self.user_id
+
+    @pytest.mark.asyncio
+    async def test_rls_context_not_set_when_jwt_invalid(self):
+        """If JWT validation fails, `set_rls_user_context` must not run —
+        we don't want to bind a session to an unverified user id. The 401
+        must be raised before any DB interaction."""
+        credentials = MagicMock()
+        credentials.credentials = "bad.jwt.token"
+
+        with (
+            patch("app.api.deps.auth.set_rls_user_context", new_callable=AsyncMock) as mock_rls,
+            patch("app.api.deps.auth.get_jwks", new_callable=AsyncMock) as mock_jwks,
+            patch("app.api.deps.auth.get_signing_key") as mock_get_key,
+        ):
+            mock_jwks.return_value = {"keys": []}
+            mock_get_key.side_effect = ValueError("no key")
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_current_user(credentials=credentials, db=self.db)
+            assert exc_info.value.status_code == 401
+
+        mock_rls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_creates_user_when_not_found(self):
         credentials = MagicMock()
         credentials.credentials = "valid.jwt.token"

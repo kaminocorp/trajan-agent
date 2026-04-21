@@ -115,7 +115,9 @@ async def trigger_indexing(
         )
 
     # Resolve GitHub token
-    github_token = await resolve_github_token(db, current_user, repo.product_id)
+    github_token = await resolve_github_token(
+        db, current_user, repo.product_id, repo_full_name=repo.full_name
+    )
     if not github_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -134,6 +136,7 @@ async def trigger_indexing(
         _run_indexing,
         repo_id=str(repository_id),
         github_token=github_token,
+        user_id=str(current_user.id),
     )
 
     return TriggerIndexingResponse(
@@ -358,9 +361,7 @@ async def get_execution_flows(
     nodes, edges = await code_graph_ops.get_graph_for_repo(db, repository_id)
 
     if not nodes:
-        return ExecutionFlowsResponse(
-            repo_id=str(repository_id), flows=[], entry_point_count=0
-        )
+        return ExecutionFlowsResponse(repo_id=str(repository_id), flows=[], entry_point_count=0)
 
     # Build lookup structures
     node_map = {n.id: n for n in nodes}
@@ -429,13 +430,17 @@ async def get_execution_flows(
                 continue
 
             if current_id != ep.id:
-                steps.append(FlowStep(
-                    node_id=str(current.id),
-                    name=current.name,
-                    type=current.type.value if hasattr(current.type, "value") else str(current.type),
-                    file_path=current.file_path,
-                    start_line=current.start_line,
-                ))
+                steps.append(
+                    FlowStep(
+                        node_id=str(current.id),
+                        name=current.name,
+                        type=current.type.value
+                        if hasattr(current.type, "value")
+                        else str(current.type),
+                        file_path=current.file_path,
+                        start_line=current.start_line,
+                    )
+                )
 
             for target_id in outgoing_calls.get(current_id, []):
                 if target_id not in visited:
@@ -475,17 +480,19 @@ async def get_execution_flows(
 
         mermaid_lines.append("  classDef entry fill:#c2410c,color:#fff,stroke:#c2410c")
 
-        flows.append(ExecutionFlow(
-            entry_point=FlowStep(
-                node_id=str(ep.id),
-                name=ep.name,
-                type=ep.type.value if hasattr(ep.type, "value") else str(ep.type),
-                file_path=ep.file_path,
-                start_line=ep.start_line,
-            ),
-            steps=steps,
-            mermaid="\n".join(mermaid_lines),
-        ))
+        flows.append(
+            ExecutionFlow(
+                entry_point=FlowStep(
+                    node_id=str(ep.id),
+                    name=ep.name,
+                    type=ep.type.value if hasattr(ep.type, "value") else str(ep.type),
+                    file_path=ep.file_path,
+                    start_line=ep.start_line,
+                ),
+                steps=steps,
+                mermaid="\n".join(mermaid_lines),
+            )
+        )
 
     return ExecutionFlowsResponse(
         repo_id=str(repository_id),
@@ -537,7 +544,9 @@ async def get_file_content(
     await check_product_viewer_access(db, repo.product_id, current_user.id)
 
     # Resolve GitHub token
-    github_token = await resolve_github_token(db, current_user, repo.product_id)
+    github_token = await resolve_github_token(
+        db, current_user, repo.product_id, repo_full_name=repo.full_name
+    )
     if not github_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -623,19 +632,28 @@ async def get_file_content(
 async def _run_indexing(
     repo_id: str,
     github_token: str,
+    user_id: str,
 ) -> None:
     """Background task for codebase indexing.
 
     Uses a fresh DB session (same pattern as changelog generation).
     """
     from app.core.database import async_session_maker
+    from app.core.rls import set_rls_user_context
     from app.services.codebase import CodebaseIndexer
 
     async with async_session_maker() as db:
         try:
+            # RLS context must be the first await: a fresh session has no
+            # app.current_user_id set, so every subsequent read of an
+            # RLS-protected table (repositories, products, code_nodes,
+            # code_edges) would silently return zero rows under trajan_app.
+            await set_rls_user_context(db, uuid_pkg.UUID(user_id))
+
             indexer = CodebaseIndexer(
                 repo_id=uuid_pkg.UUID(repo_id),
                 github_token=github_token,
+                user_id=uuid_pkg.UUID(user_id),
             )
             result = await indexer.run(db)
 
